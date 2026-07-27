@@ -1466,6 +1466,29 @@ function YinYang:CreateWindow(title_text, startTheme)
     }, TopBar)
     TitleLabel:SetAttribute("ThemeTextRole", "Text")
 
+    --// Contador de jugadores usando el backend (esquina opuesta al título)
+    local OnlineCountIcon = mk("ImageLabel", {
+        Size = UDim2.new(0, 14, 0, 14),
+        Position = UDim2.new(1, -104, 0.5, -7),
+        BackgroundTransparency = 1,
+        Image = "rbxassetid://74246983577629",
+        ScaleType = Enum.ScaleType.Fit,
+        ZIndex = 7,
+    }, TopBar)
+
+    local OnlineCountLabel = mk("TextLabel", {
+        Size = UDim2.new(0, 78, 1, 0),
+        Position = UDim2.new(1, -86, 0, 0),
+        BackgroundTransparency = 1,
+        Text = "0 online",
+        TextColor3 = Theme.Text,
+        Font = Enum.Font.GothamBold,
+        TextSize = 13,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        ZIndex = 7
+    }, TopBar)
+    OnlineCountLabel:SetAttribute("ThemeTextRole", "Text")
+
 
     --// BOOMBOX: Píldora en el centro del TopBar
     local BoomboxSound = nil
@@ -3601,37 +3624,6 @@ function YinYang:CreateWindow(title_text, startTheme)
         end)
     end
 
-    --// Heartbeat: le avisa al backend que este jugador sigue activo
-    --// El backend cuenta a un jugador como "online" si mandó un heartbeat
-    --// en los últimos 30 segundos, así que lo repetimos cada 15s (margen de sobra)
-    local HeartbeatRate = 15
-    local function BackendHeartbeat()
-        task.spawn(function()
-            local body = HttpService:JSONEncode({
-                playerId = tostring(LocalPlayer.UserId),
-                playerName = tostring(LocalPlayer.Name),
-            })
-
-            pcall(function()
-                UniversalRequest({
-                    Url = BACKEND_URL .. "/api/chat/heartbeat",
-                    Method = "POST",
-                    Headers = { ["Content-Type"] = "application/json" },
-                    Body = body,
-                })
-            end)
-        end)
-    end
-
-    local function StartHeartbeatLoop()
-        task.spawn(function()
-            while true do
-                BackendHeartbeat()
-                task.wait(HeartbeatRate)
-            end
-        end)
-    end
-
     --// Traducir un mensaje bajo demanda (botón manual por mensaje)
     --// callback(translatedText, sourceLanguage, targetLanguage, errorMessage)
     local function TranslateMessage(text, targetLanguage, callback)
@@ -3690,10 +3682,17 @@ function YinYang:CreateWindow(title_text, startTheme)
                             print("[ChatGlobal] Conectado al backend correctamente")
                         end
 
+                        if data.onlineCount ~= nil then
+                            OnlineCountLabel.Text = tostring(data.onlineCount) .. " online"
+                        end
+
                         for _, msg in ipairs(data.messages) do
                             if not knownServerIds[msg.id] then
                                 knownServerIds[msg.id] = true
-                                task.spawn(onNewMessage, msg)
+                                -- Evitar re-mostrar el mensaje que YO mismo envié
+                                if tostring(msg.playerId) ~= tostring(LocalPlayer.UserId) then
+                                    task.spawn(onNewMessage, msg)
+                                end
                             end
                         end
                     end
@@ -4614,7 +4613,10 @@ function YinYang:CreateWindow(title_text, startTheme)
     	local localPlayer = Players.LocalPlayer
     	local timestamp = os.date("%H:%M:%S")
 
-    	-- Sincronizar con el backend; el mensaje se renderiza al volver por el polling
+    	AddChatMessage(localPlayer.Name, localPlayer.UserId, messageText, timestamp)
+    	RenderMessage(localPlayer.Name, localPlayer.UserId, messageText, timestamp, true)
+
+    	-- Sincronizar con el backend para que otros jugadores lo reciban
     	BackendSendMessage(localPlayer.Name, localPlayer.UserId, messageText)
 
     	MessageInput.Text = ""
@@ -4641,7 +4643,10 @@ function YinYang:CreateWindow(title_text, startTheme)
 
     local function SendSticker(assetId)
         local localPlayer = Players.LocalPlayer
+        local timestamp = os.date("%H:%M:%S")
         local stickerMsg = "[[STICKER:" .. assetId .. "]]"
+        AddChatMessage(localPlayer.Name, localPlayer.UserId, stickerMsg, timestamp)
+        RenderMessage(localPlayer.Name, localPlayer.UserId, stickerMsg, timestamp, true)
         BackendSendMessage(localPlayer.Name, localPlayer.UserId, stickerMsg)
         StickerPanel.Visible = false
     end
@@ -4803,13 +4808,9 @@ function YinYang:CreateWindow(title_text, startTheme)
     --// Iniciar sincronización en tiempo real con el backend
     --// Cada mensaje nuevo de OTRO jugador se agrega y renderiza automáticamente
     StartBackendPolling(function(msg)
-        local isSelf = tostring(msg.playerId) == tostring(LocalPlayer.UserId)
         AddChatMessage(msg.playerName, msg.playerId, msg.message, os.date("%H:%M:%S", msg.timestamp))
-        RenderMessage(msg.playerName, msg.playerId, msg.message, os.date("%H:%M:%S", msg.timestamp), isSelf)
+        RenderMessage(msg.playerName, msg.playerId, msg.message, os.date("%H:%M:%S", msg.timestamp), false)
     end)
-
-    --// Avisar al backend que este jugador está activo (para el contador "online")
-    StartHeartbeatLoop()
 
     --// ════════════════════════════════════════════════════════════════
     --// UPDATE LOOP — Cambio instantáneo de idioma (v28 PRO)
@@ -4927,7 +4928,7 @@ if DEMO_ACTIVO then
         print("GodMode: " .. (state and "ON" or "OFF"))
     end)
     
-    print("\n DEMO v28 INICIADA")
+    print("\n DEMO v24 INICIADA")
     print("TABS: Inicio (Protegida) | Temas (16 colores sin duplicados) | Features | Dropdowns | Efectos")
     print(" MEJORAS: Sin duplicados, Pestañas permanentes, Efectos de texto mejorados")
     print("Para desactivar la demo, cambia DEMO_ACTIVO a false\n")
@@ -4938,7 +4939,7 @@ if DEMO_ACTIVO then
     DemoUI:SetTextEffect("Rainbow")
     print(" Efecto: " .. TemaInicial .. " + Rainbow (Yin-Yang Theme)")
 else
-    print("Yin Yang v28 - DEMO DESACTIVADA (DEMO_ACTIVO = false)")
+    print("Yin Yang v24 - DEMO DESACTIVADA (DEMO_ACTIVO = false)")
     print("Solo la librería está cargada y lista para usar")
 end
 
