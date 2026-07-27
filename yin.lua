@@ -4927,7 +4927,7 @@ if DEMO_ACTIVO then
         print("GodMode: " .. (state and "ON" or "OFF"))
     end)
     
-    print("\n DEMO v24 INICIADA")
+    print("\n DEMO v28 INICIADA")
     print("TABS: Inicio (Protegida) | Temas (16 colores sin duplicados) | Features | Dropdowns | Efectos")
     print(" MEJORAS: Sin duplicados, Pestañas permanentes, Efectos de texto mejorados")
     print("Para desactivar la demo, cambia DEMO_ACTIVO a false\n")
@@ -4938,7 +4938,7 @@ if DEMO_ACTIVO then
     DemoUI:SetTextEffect("Rainbow")
     print(" Efecto: " .. TemaInicial .. " + Rainbow (Yin-Yang Theme)")
 else
-    print("Yin Yang v24 - DEMO DESACTIVADA (DEMO_ACTIVO = false)")
+    print("Yin Yang v28 - DEMO DESACTIVADA (DEMO_ACTIVO = false)")
     print("Solo la librería está cargada y lista para usar")
 end
 
