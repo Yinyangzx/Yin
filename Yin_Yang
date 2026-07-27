@@ -4857,7 +4857,7 @@ print(" Yin Yang v24 CON TEMA CAT V1  - ¡Librería cargada y lista para usar!")
 --// - Para DESACTIVAR: Cambia "DEMO_ACTIVO" a false
 --// ============================================================
 
-local DEMO_ACTIVO = true  -- Demo desactivada para usar la librería desde otro script
+local DEMO_ACTIVO = false  -- Demo desactivada para usar la librería desde otro script
 
 if DEMO_ACTIVO then
     task.wait(0.5)
