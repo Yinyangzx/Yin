@@ -29,7 +29,7 @@
 --// local MiTab = Window:CreateTab("Nombre de la Pestaña", "rbxassetid://ASSET_ID")
 --//
 --// EJEMPLO 1: Crear una pestaña con icono de casa
---// local TabCasa = Window:CreateTab("Mi Casa", "rbxassetid://124987849953130")
+--// local TabCasa = Window:CreateTab("Mi Casa", "rbxassetid://71085559019524")
 --//
 --// EJEMPLO 2: Crear una pestaña sin icono
 --// local TabSimple = Window:CreateTab("Simple", nil)
@@ -37,9 +37,9 @@
 --// local TabSimple = Window:CreateTab("Simple")
 --//
 --// EJEMPLO 3: Usar diferentes assets
---// local TabManzana = Window:CreateTab("Frutas", "rbxassetid://84419345138935")
---// local TabRayo = Window:CreateTab("Energía", "rbxassetid://114693810646148")
---// local TabAjustes = Window:CreateTab("Configuración", "rbxassetid://86797720103644")
+--// local TabManzana = Window:CreateTab("Frutas", "rbxassetid://108938004711116")
+--// local TabRayo = Window:CreateTab("Energía", "rbxassetid://132646825035547")
+--// local TabAjustes = Window:CreateTab("Configuración", "rbxassetid://130729134186771")
 --//
 --// LISTA DE ASSETS DISPONIBLES EN LA LIBRERÍA:
 --// • Casa: 124987849953130
@@ -896,6 +896,204 @@ local ThemeBackgroundImages = {
     PibbleV1 = "rbxassetid://108798897997443",
 }
 
+--// Efectos automáticos por tema (se llena desde el repo externo)
+local ThemeAutoEffects = {
+    CatV1     = "CatRainbow",
+    ErisV1    = "ErisRainbow",
+    ShylfieV1 = "ShylfieRainbow",
+    SukunaV1  = "SukunaRainbow",
+}
+
+--// Orden de temas (se reemplaza con el del repo externo si descarga ok)
+local ThemeOrder = nil
+
+--// ════════════════════════════════════════════════════════════════
+--// SISTEMA DE TEMAS EXTERNOS (LoadThemes)
+--// Siempre intenta descargar primero.
+--// Solo usa caché si falla internet.
+--// Solo usa embebido si no hay caché.
+--// ════════════════════════════════════════════════════════════════
+local THEMES_URL        = "https://raw.githubusercontent.com/Yinyangzx/Temas/refs/heads/main/YinYang_Themes.lua"
+local THEMES_CACHE_FILE = "yin_yang_themes_cache.lua"
+
+local function LoadThemes()
+    local rawData = nil
+
+    --// PASO 1: Intentar descargar siempre primero
+    --// Usamos game:HttpGet() — funciona en Delta y la mayoría de executors
+    --// HttpService:GetAsync() da "blocked" en executors móviles como Delta
+    local dlOk, dlResult = pcall(function()
+        return game:HttpGet(THEMES_URL, true)
+    end)
+
+    if dlOk and type(dlResult) == "string" and #dlResult > 20 then
+        rawData = dlResult
+        print("[YinYang Themes] ✅ Temas descargados desde repo")
+        --// Actualizar caché con lo descargado
+        pcall(function()
+            if writefile then
+                writefile(THEMES_CACHE_FILE, rawData)
+                print("[YinYang Themes] 💾 Caché actualizada")
+            end
+        end)
+    else
+        --// PASO 2: Descarga falló → intentar caché local
+        print("[YinYang Themes] ⚠️ Descarga falló, intentando caché...")
+        pcall(function()
+            if readfile and isfile and isfile(THEMES_CACHE_FILE) then
+                rawData = readfile(THEMES_CACHE_FILE)
+                print("[YinYang Themes] 📁 Usando caché local")
+            end
+        end)
+    end
+
+    --// PASO 3: Si tenemos datos (de descarga o caché), procesarlos
+    if rawData then
+        local parseOk, data = pcall(function()
+            return loadstring(rawData)()
+        end)
+
+        if parseOk and type(data) == "table" and data.Themes then
+            local count = 0
+            --// Mergear temas externos en las tablas existentes
+            for name, theme in pairs(data.Themes) do
+                if theme.Palette then
+                    ThemePalettes[name] = theme.Palette
+                end
+                if theme.Sound then
+                    ThemeClickSounds[name] = theme.Sound
+                end
+                if theme.Background then
+                    ThemeBackgroundImages[name] = theme.Background
+                end
+                if theme.Effect and theme.Effect ~= "Off" then
+                    ThemeAutoEffects[name] = theme.Effect
+                end
+                count = count + 1
+            end
+
+            --// Guardar orden del repo
+            if data.Order then
+                ThemeOrder = data.Order
+            end
+
+            print("[YinYang Themes] ✅ " .. count .. " temas cargados (v" .. tostring(data.Version or "?") .. ")")
+            return true
+        else
+            print("[YinYang Themes] ❌ Error al parsear datos de temas")
+        end
+    else
+        print("[YinYang Themes] ❌ Sin datos disponibles, usando temas embebidos")
+    end
+
+    --// PASO 4: Todo falló → las tablas embebidas quedan intactas como fallback
+    return false
+end
+
+LoadThemes()
+
+--// ════════════════════════════════════════════════════════════════
+--// TABLAS DE STICKERS (se rellenan con LoadStickers)
+--// ⚠️ NO ELIMINAR — fallback embebido si el repo no está disponible
+--// ════════════════════════════════════════════════════════════════
+local StickerPalettes = {
+    Sonrisa  = { Image = "rbxassetid://135857695171095", LabelES = "Sonrisa",  LabelEN = "Smile"     },
+    Llorar   = { Image = "rbxassetid://138363247925206", LabelES = "Llorar",   LabelEN = "Crying"    },
+    Amor     = { Image = "rbxassetid://76164124882568",  LabelES = "Amor",     LabelEN = "Love"      },
+    Corazon  = { Image = "rbxassetid://76164124882568",  LabelES = "Corazón",  LabelEN = "Heart"     },
+    Emoji    = { Image = "rbxassetid://133861773375312", LabelES = "Emoji",    LabelEN = "Emoji"     },
+    Risa     = { Image = "rbxassetid://109165098870367", LabelES = "Risa",     LabelEN = "Laugh"     },
+    Sorpresa = { Image = "rbxassetid://89213081637073",  LabelES = "Sorpresa", LabelEN = "Surprised" },
+    Triste   = { Image = "rbxassetid://80817302481160",  LabelES = "Triste",   LabelEN = "Sad"       },
+    Enojado  = { Image = "rbxassetid://72815688632249",  LabelES = "Enojado",  LabelEN = "Angry"     },
+    Wink     = { Image = "rbxassetid://72602706593283",  LabelES = "Guiño",    LabelEN = "Wink"      },
+    Cool     = { Image = "rbxassetid://129224642026377", LabelES = "Cool",     LabelEN = "Cool"      },
+}
+
+-- nil hasta que LoadStickers() corra exitosamente
+local StickerOrder = nil
+
+--// ════════════════════════════════════════════════════════════════
+--// SISTEMA DE STICKERS EXTERNOS (LoadStickers)
+--// Siempre intenta descargar primero.
+--// Solo usa caché si falla internet.
+--// Solo usa embebido si no hay caché.
+--// ⚠️ NO ELIMINAR
+--// ════════════════════════════════════════════════════════════════
+local STICKERS_URL        = "https://raw.githubusercontent.com/Yinyangzx/Yin-Stickers/refs/heads/main/YinYang_Stickers.lua"
+local STICKERS_CACHE_FILE = "yin_yang_stickers_cache.lua"
+
+local function LoadStickers()
+    local rawData = nil
+
+    --// PASO 1: Intentar descargar siempre primero
+    --// Usamos game:HttpGet() — funciona en Delta y la mayoría de executors
+    --// HttpService:GetAsync() da "blocked" en executors móviles como Delta
+    local dlOk, dlResult = pcall(function()
+        return game:HttpGet(STICKERS_URL, true)
+    end)
+
+    if dlOk and type(dlResult) == "string" and #dlResult > 20 then
+        rawData = dlResult
+        print("[YinYang Stickers] ✅ Stickers descargados desde repo")
+        --// Actualizar caché con lo descargado
+        pcall(function()
+            if writefile then
+                writefile(STICKERS_CACHE_FILE, rawData)
+                print("[YinYang Stickers] 💾 Caché actualizada")
+            end
+        end)
+    else
+        --// PASO 2: Descarga falló → intentar caché local
+        print("[YinYang Stickers] ⚠️ Descarga falló, intentando caché...")
+        pcall(function()
+            if readfile and isfile and isfile(STICKERS_CACHE_FILE) then
+                rawData = readfile(STICKERS_CACHE_FILE)
+                print("[YinYang Stickers] 📁 Usando caché local")
+            end
+        end)
+    end
+
+    --// PASO 3: Si tenemos datos (de descarga o caché), procesarlos
+    if rawData then
+        local parseOk, data = pcall(function()
+            return loadstring(rawData)()
+        end)
+
+        if parseOk and type(data) == "table" and data.Stickers then
+            local count = 0
+            --// Mergear stickers externos en la tabla embebida
+            for name, sticker in pairs(data.Stickers) do
+                if sticker.Image then
+                    StickerPalettes[name] = {
+                        Image   = sticker.Image,
+                        LabelES = sticker.LabelES or name,
+                        LabelEN = sticker.LabelEN or name,
+                    }
+                    count = count + 1
+                end
+            end
+
+            --// Guardar orden del repo
+            if data.Order then
+                StickerOrder = data.Order
+            end
+
+            print("[YinYang Stickers] ✅ " .. count .. " stickers cargados (v" .. tostring(data.Version or "?") .. ")")
+            return true
+        else
+            print("[YinYang Stickers] ❌ Error al parsear datos de stickers")
+        end
+    else
+        print("[YinYang Stickers] ❌ Sin datos disponibles, usando stickers embebidos")
+    end
+
+    --// PASO 4: Todo falló → StickerPalettes embebida queda intacta como fallback
+    return false
+end
+
+LoadStickers()
+
 local Theme
 
 --// UTILIDADES
@@ -1466,29 +1664,6 @@ function YinYang:CreateWindow(title_text, startTheme)
     }, TopBar)
     TitleLabel:SetAttribute("ThemeTextRole", "Text")
 
-    --// Contador de jugadores usando el backend (esquina opuesta al título)
-    local OnlineCountIcon = mk("ImageLabel", {
-        Size = UDim2.new(0, 14, 0, 14),
-        Position = UDim2.new(1, -104, 0.5, -7),
-        BackgroundTransparency = 1,
-        Image = "rbxassetid://74246983577629",
-        ScaleType = Enum.ScaleType.Fit,
-        ZIndex = 7,
-    }, TopBar)
-
-    local OnlineCountLabel = mk("TextLabel", {
-        Size = UDim2.new(0, 78, 1, 0),
-        Position = UDim2.new(1, -86, 0, 0),
-        BackgroundTransparency = 1,
-        Text = "0 online",
-        TextColor3 = Theme.Text,
-        Font = Enum.Font.GothamBold,
-        TextSize = 13,
-        TextXAlignment = Enum.TextXAlignment.Left,
-        ZIndex = 7
-    }, TopBar)
-    OnlineCountLabel:SetAttribute("ThemeTextRole", "Text")
-
 
     --// BOOMBOX: Píldora en el centro del TopBar
     local BoomboxSound = nil
@@ -1884,8 +2059,8 @@ function YinYang:CreateWindow(title_text, startTheme)
 
         local textStart = 38
         if iconAsset then
-            local iconSize = (displayName == "Chat") and 45 or 24
-            local iconPos = (displayName == "Chat") and 0 or 7
+            local iconSize = 24
+            local iconPos = 7
             mk("ImageLabel", {
                 Parent = TabButton,
                 Size = UDim2.new(0, iconSize, 0, iconSize),
@@ -2632,122 +2807,247 @@ function YinYang:CreateWindow(title_text, startTheme)
             return FloatingWindow
         end
 
-        --// 🎚️ SLIDER NATIVO PROFESIONAL (v26 - NUEVO)
+        --// 🎚️ SLIDER PREMIUM v2.0 (OTRO NIVEL - Zero Lag + GV2 Glow + Rango Visible)
         function Tab:CreateSlider(text, min, max, default, callback)
             local value = default or min
             local isDragging = false
+            local lastUpdateTime = 0
+            local UPDATE_THROTTLE = 0.008  -- 120fps smoothness
             
+            --// CONTAINER PRINCIPAL
             local Holder = mk("Frame", {
                 Parent = TabPage,
-                Size = UDim2.new(1, 0, 0, 60),
+                Size = UDim2.new(1, 0, 0, 72),
                 BackgroundColor3 = Theme.Secondary,
                 BackgroundTransparency = 0.5,
                 ZIndex = 9
             })
             Holder:SetAttribute("ThemeRole", "Secondary")
-            corner(Holder, 6)
-            stroke(Holder, Theme.Stroke, 1, 0.6)
+            Holder:SetAttribute("IsSliderHolder", true)
+            corner(Holder, 12)
+            stroke(Holder, Theme.Stroke, 1.5, 0.6)
+            buildAnimatedBorder(Holder, Theme.Accent, UDim.new(0, 12), true)
 
+            --// LABEL PRINCIPAL
             local LabelTxt = mk("TextLabel", {
                 Parent = Holder,
-                Size = UDim2.new(0, 150, 0, 20),
-                Position = UDim2.new(0, 12, 0, 8),
+                Size = UDim2.new(0, 200, 0, 22),
+                Position = UDim2.new(0, 16, 0, 10),
                 BackgroundTransparency = 1,
                 Text = text,
                 TextColor3 = Theme.Text,
                 Font = Enum.Font.GothamBold,
-                TextSize = 13,
+                TextSize = 14,
                 TextXAlignment = Enum.TextXAlignment.Left,
                 ZIndex = 10
             })
             LabelTxt:SetAttribute("ThemeRole", "Text")
 
+            --// VALUE LABEL (Dinámico a la derecha)
             local ValueLabel = mk("TextLabel", {
                 Parent = Holder,
-                Size = UDim2.new(0, 60, 0, 20),
-                Position = UDim2.new(1, -70, 0, 8),
+                Size = UDim2.new(0, 70, 0, 22),
+                Position = UDim2.new(1, -86, 0, 10),
                 BackgroundTransparency = 1,
                 Text = tostring(math.floor(value * 100) / 100),
                 TextColor3 = Theme.Accent,
                 Font = Enum.Font.GothamBold,
-                TextSize = 12,
+                TextSize = 13,
                 TextXAlignment = Enum.TextXAlignment.Right,
-                ZIndex = 10
+                ZIndex = 11
             })
             ValueLabel:SetAttribute("ThemeRole", "Accent")
 
+            --// RANGO MÍNIMO (Abajo a la izquierda)
+            local MinLabel = mk("TextLabel", {
+                Parent = Holder,
+                Size = UDim2.new(0, 50, 0, 16),
+                Position = UDim2.new(0, 16, 0, 52),
+                BackgroundTransparency = 1,
+                Text = tostring(min),
+                TextColor3 = Theme.AccentOff,
+                Font = Enum.Font.Gotham,
+                TextSize = 10,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                ZIndex = 10
+            })
+            MinLabel:SetAttribute("ThemeRole", "AccentOff")
+
+            --// RANGO MÁXIMO (Abajo a la derecha)
+            local MaxLabel = mk("TextLabel", {
+                Parent = Holder,
+                Size = UDim2.new(0, 50, 0, 16),
+                Position = UDim2.new(1, -66, 0, 52),
+                BackgroundTransparency = 1,
+                Text = tostring(max),
+                TextColor3 = Theme.AccentOff,
+                Font = Enum.Font.Gotham,
+                TextSize = 10,
+                TextXAlignment = Enum.TextXAlignment.Right,
+                ZIndex = 10
+            })
+            MaxLabel:SetAttribute("ThemeRole", "AccentOff")
+
+            --// SLIDER BACKGROUND (Barra de fondo)
             local SliderBackground = mk("Frame", {
                 Parent = Holder,
-                Size = UDim2.new(1, -24, 0, 6),
-                Position = UDim2.new(0, 12, 0, 32),
+                Size = UDim2.new(1, -32, 0, 5),
+                Position = UDim2.new(0, 16, 0, 44),
                 BackgroundColor3 = Theme.AccentOff,
+                BorderSizePixel = 0,
                 ZIndex = 10
             })
             SliderBackground:SetAttribute("ThemeRole", "AccentOff")
-            corner(SliderBackground, 3)
+            corner(SliderBackground, 2)
 
+            --// SLIDER FILL (La barra que se llena)
             local SliderFill = mk("Frame", {
                 Parent = SliderBackground,
                 Size = UDim2.new(0, 0, 1, 0),
                 Position = UDim2.new(0, 0, 0, 0),
                 BackgroundColor3 = Theme.Accent,
+                BorderSizePixel = 0,
                 ZIndex = 11
             })
             SliderFill:SetAttribute("ThemeRole", "Accent")
-            corner(SliderFill, 3)
+            corner(SliderFill, 2)
 
+            --// SLIDER THUMB PRINCIPAL (El círculo/rectángulo que arrastramos)
             local SliderThumb = mk("Frame", {
                 Parent = Holder,
-                Size = UDim2.new(0, 16, 0, 24),
-                Position = UDim2.new(0, 12, 0, 28),
+                Size = UDim2.new(0, 14, 0, 22),
+                Position = UDim2.new(0, 16, 0, 37),
                 BackgroundColor3 = Theme.Accent,
-                ZIndex = 12
+                BorderSizePixel = 0,
+                ZIndex = 13
             })
             SliderThumb:SetAttribute("ThemeRole", "Accent")
-            corner(SliderThumb, 3)
-            stroke(SliderThumb, Theme.Stroke, 1, 0.5)
+            corner(SliderThumb, 8)
 
+            --// GLOW EFFECT (sin asset externo)
+            local ThumbGlow = mk("Frame", {
+                Parent = SliderThumb,
+                Size = UDim2.new(1, 6, 1, 6),
+                Position = UDim2.new(0, -3, 0, -3),
+                BackgroundColor3 = Theme.Accent,
+                BackgroundTransparency = 0.7,
+                BorderSizePixel = 0,
+                ZIndex = 12
+            })
+            ThumbGlow:SetAttribute("ThemeRole", "Accent")
+            corner(ThumbGlow, 10)
+
+            --// BORDE ELEGANTE DEL THUMB
+            stroke(SliderThumb, Theme.Stroke, 1, 0.7)
+
+            --// FUNCIÓN: Actualizar slider (OPTIMIZADA)
             local function UpdateSlider(percentage)
                 percentage = math.clamp(percentage, 0, 1)
                 value = min + (max - min) * percentage
-                SliderFill.Size = UDim2.new(percentage, 0, 1, 0)
-                SliderThumb.Position = UDim2.new(0, 12 + (Holder.AbsoluteSize.X - 24) * percentage - 8, 0, 28)
+                
+                --// Animar el fill suavemente
+                local barWidth = SliderBackground.AbsoluteSize.X
+                local targetSize = UDim2.new(percentage, 0, 1, 0)
+                TweenService:Create(SliderFill, TweenInfo.new(0.05), {Size = targetSize}):Play()
+                
+                --// Posición del thumb (SUAVE con Tween)
+                local thumbTargetX = 16 + (barWidth) * percentage - 7
+                local tweenThumb = TweenService:Create(
+                    SliderThumb, 
+                    TweenInfo.new(0.04, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+                    {Position = UDim2.new(0, thumbTargetX, 0, 37)}
+                )
+                tweenThumb:Play()
+
+                --// GLOW PULSE cuando se mueve
+                local tweenGlow = TweenService:Create(
+                    ThumbGlow,
+                    TweenInfo.new(0.2, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
+                    {BackgroundTransparency = 0.4}
+                )
+                tweenGlow:Play()
+                
+                --// Actualizar valor en label (sin delays)
                 ValueLabel.Text = tostring(math.floor(value * 100) / 100)
-                pcall(callback, value)
+                
+                --// Callback sin lag
+                task.spawn(function()
+                    pcall(callback, value)
+                end)
             end
 
+            --// FUNCIÓN: Manejar clicks del slider
             local function OnSliderClick(input)
                 if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
                     isDragging = true
+                    
+                    --// EFECTO: El thumb se agranda ligeramente cuando lo agarras
+                    TweenService:Create(
+                        SliderThumb,
+                        TweenInfo.new(0.1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+                        {Size = UDim2.new(0, 16, 0, 26)}
+                    ):Play()
                 end
             end
 
+            --// FUNCIÓN: Manejar soltar el slider
+            local function OnSliderRelease(input)
+                if isDragging and (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
+                    isDragging = false
+                    
+                    --// EFECTO: El thumb vuelve a su tamaño normal
+                    TweenService:Create(
+                        SliderThumb,
+                        TweenInfo.new(0.1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+                        {Size = UDim2.new(0, 14, 0, 22)}
+                    ):Play()
+                    
+                    --// SONIDO al soltar
+                    playSound(Sounds.Click, 0.5)
+                    
+                    --// GLOW vuelve a transparency normal
+                    TweenService:Create(
+                        ThumbGlow,
+                        TweenInfo.new(0.3, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
+                        {BackgroundTransparency = 0.7}
+                    ):Play()
+                end
+            end
+
+            --// CONECTAR EVENTOS DE CLICK
             SliderBackground.InputBegan:Connect(OnSliderClick)
             SliderThumb.InputBegan:Connect(OnSliderClick)
 
+            --// INPUT MOVEMENT (OPTIMIZADO - Sin tartamudeos) 🚀
             track(UserInputService.InputChanged:Connect(function(input)
                 if isDragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-                    local relativeX = input.Position.X - SliderBackground.AbsolutePosition.X
-                    local barWidth = SliderBackground.AbsoluteSize.X
-                    local percentage = math.clamp(relativeX / barWidth, 0, 1)
-                    UpdateSlider(percentage)
-                    --  FIX v26.1: Eliminado playSound en InputChanged (generaba cacofonía)
-                    -- El sonido se reproduce solo al soltar en InputEnded
+                    local currentTime = tick()
+                    
+                    --// THROTTLE: Solo actualizar cada 8ms (120fps max)
+                    if currentTime - lastUpdateTime >= UPDATE_THROTTLE then
+                        lastUpdateTime = currentTime
+                        
+                        local relativeX = input.Position.X - SliderBackground.AbsolutePosition.X
+                        local barWidth = SliderBackground.AbsoluteSize.X
+                        local percentage = math.clamp(relativeX / barWidth, 0, 1)
+                        
+                        UpdateSlider(percentage)
+                    end
                 end
             end))
 
-            --  FIX v26.1: Cambiar de UserInputService.InputEnded (GLOBAL) a SliderThumb.InputEnded (LOCAL)
-            -- Ahora el sonido solo se reproduce al soltar DENTRO del slider, no en toda la pantalla
-            track(SliderThumb.InputEnded:Connect(function(input)
-                if isDragging and (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
-                    isDragging = false
-                    playSound(Sounds.Click, 0.5)
+            --// SOLTAR SLIDER - GLOBAL para celular (evita que se quede pegado)
+            track(UserInputService.InputEnded:Connect(function(input)
+                if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                    OnSliderRelease(input)
                 end
             end))
 
+            --// ACTUALIZAR INICIAL
             UpdateSlider((value - min) / (max - min))
             resetScrollTop(TabPage)
             
+            --// RETORNAR TABLA CON MÉTODOS
             return {
                 Set = function(newValue)
                     value = math.clamp(newValue, min, max)
@@ -2755,6 +3055,14 @@ function YinYang:CreateWindow(title_text, startTheme)
                 end,
                 Get = function()
                     return value
+                end,
+                SetMin = function(newMin)
+                    min = newMin
+                    MinLabel.Text = tostring(min)
+                end,
+                SetMax = function(newMax)
+                    max = newMax
+                    MaxLabel.Text = tostring(max)
                 end
             }
         end
@@ -3106,19 +3414,10 @@ function YinYang:CreateWindow(title_text, startTheme)
             CurrentClickSound = Sounds.Click
         end
 
-        --//  SISTEMA DE EFECTO DINÁMICO POR TEMA
-        if themeName == "CatV1" then
-            self:SetTextEffect("CatRainbow")
-            print(" Tema Cat V1 activado + Sonido personalizado")
-        elseif themeName == "ErisV1" then
-            self:SetTextEffect("ErisRainbow")
-            print("🔴 Tema Eris V1 activado + Sonido personalizado")
-        elseif themeName == "ShylfieV1" then
-            self:SetTextEffect("ShylfieRainbow")
-            print(" Tema Shylfie V1 activado (Rainbow Amarillo-Blanco)")
-        elseif themeName == "SukunaV1" then
-            self:SetTextEffect("SukunaRainbow")
-            print("🔴 Tema Sukuna V1 activado (Rainbow Negro-Rojo)")
+        --// SISTEMA DE EFECTO DINÁMICO POR TEMA (desde ThemeAutoEffects)
+        local autoEffect = ThemeAutoEffects[themeName]
+        if autoEffect and autoEffect ~= "Off" then
+            self:SetTextEffect(autoEffect)
         else
             self:SetTextEffect("Off")
         end
@@ -3132,6 +3431,13 @@ function YinYang:CreateWindow(title_text, startTheme)
         for _, floatData in ipairs(Window.FloatingToggles or {}) do
             if floatData.Window and floatData.Window.Parent then
                 buildAnimatedBorder(floatData.Window, Theme.Accent, UDim.new(1, 0), true)
+            end
+        end
+
+        -- Actualizar borde animado de todos los sliders
+        for _, obj in ipairs(Main:GetDescendants()) do
+            if obj:GetAttribute("IsSliderHolder") then
+                buildAnimatedBorder(obj, Theme.Accent, UDim.new(0, 12), true)
             end
         end
     end
@@ -3340,13 +3646,13 @@ function YinYang:CreateWindow(title_text, startTheme)
     --// ════════════════════════════════════════════════════════════════
     
     -- TAB 1: INICIO (Automático)
-    local AutoTabInicio = Window:CreateTab("Inicio", "Home", "rbxassetid://124987849953130")
+    local AutoTabInicio = Window:CreateTab("Inicio", "Home", "rbxassetid://71085559019524")
     AutoTabInicio:CreateWelcomeCard()
     AutoTabInicio:CreateDivider()
     AutoTabInicio:CreateServerInfoCard()
     
     -- TAB 2: TEMAS (Automático)
-    local AutoTabTemas = Window:CreateTab("Temas", "Themes", "rbxassetid://84419345138935")
+    local AutoTabTemas = Window:CreateTab("Temas", "Themes", "rbxassetid://108938004711116")
     AutoTabTemas:CreateLabel("Temas Personalizados", 14)
     AutoTabTemas:CreateDivider()
 
@@ -3392,7 +3698,7 @@ function YinYang:CreateWindow(title_text, startTheme)
     ThemeSearchBox:SetAttribute("ThemeTextRole", "Text")
     resetScrollTop(AutoTabTemas.Page)
 
-    local temas = {
+    local temas = ThemeOrder or {
         "Dark", "DarkV2",
         "Red", "RedV2",
         "Pink", "PinkV2", "PinkV3",
@@ -3403,8 +3709,8 @@ function YinYang:CreateWindow(title_text, startTheme)
         "LightV1",
         "ErisV1",
         "ShylfieV1",
-        "SukunaV1",
-        "V1", "V2", "V3", "V4", "V5", "V6", "V9", "V10", "V11",
+        "SukunaV1", "SukunaV2",
+        "V1", "V2", "V3", "V4", "V5", "V6", "V9", "V10", "V11", "V14",
         "PibbleV1",
     }
 
@@ -3432,7 +3738,7 @@ function YinYang:CreateWindow(title_text, startTheme)
     end)
     
     -- TAB 3: EFECTOS (Automático)
-    local AutoTabEfectos = Window:CreateTab("Efectos", "Effects", "rbxassetid://114693810646148")
+    local AutoTabEfectos = Window:CreateTab("Efectos", "Effects", "rbxassetid://132646825035547")
     AutoTabEfectos:CreateLabel("Efectos de Texto", "Text Effects", 14)
     AutoTabEfectos:CreateDivider()
     
@@ -3457,7 +3763,7 @@ function YinYang:CreateWindow(title_text, startTheme)
     end)
 
     --//  4TA PESTAÑA PERMANENTE: AJUSTES
-    local AutoTabAjustes = Window:CreateTab("Ajustes", "Settings", "rbxassetid://86797720103644")
+    local AutoTabAjustes = Window:CreateTab("Ajustes", "Settings", "rbxassetid://130729134186771")
     AutoTabAjustes:CreateLabel("Configuración", "Settings", 14)
     AutoTabAjustes:CreateDivider()
     
@@ -3682,10 +3988,6 @@ function YinYang:CreateWindow(title_text, startTheme)
                             print("[ChatGlobal] Conectado al backend correctamente")
                         end
 
-                        if data.onlineCount ~= nil then
-                            OnlineCountLabel.Text = tostring(data.onlineCount) .. " online"
-                        end
-
                         for _, msg in ipairs(data.messages) do
                             if not knownServerIds[msg.id] then
                                 knownServerIds[msg.id] = true
@@ -3695,12 +3997,35 @@ function YinYang:CreateWindow(title_text, startTheme)
                                 end
                             end
                         end
+
+                        -- ACTUALIZAR CONTADOR DE USUARIOS ONLINE
+                        if data.onlineCount then
+                            pcall(function()
+                                OnlineLabel.Text = tostring(data.onlineCount)
+                            end)
+                        elseif data.messages then
+                            -- Contar IDs únicos de los últimos mensajes como estimado
+                            local uniqueIds = {}
+                            for _, msg in ipairs(data.messages) do
+                                if msg.playerId then
+                                    uniqueIds[tostring(msg.playerId)] = true
+                                end
+                            end
+                            local count = 0
+                            for _ in pairs(uniqueIds) do count = count + 1 end
+                            pcall(function()
+                                OnlineLabel.Text = tostring(count)
+                            end)
+                        end
                     end
                 else
                     if backendConnected then
                         warn("[ChatGlobal] Se perdió conexión con el backend")
                     end
                     backendConnected = false
+                    pcall(function()
+                        OnlineLabel.Text = "0"
+                    end)
                 end
 
                 task.wait(ChatSyncPollRate)
@@ -3708,7 +4033,7 @@ function YinYang:CreateWindow(title_text, startTheme)
         end)
     end
 
-    local ChatTab = Window:CreateTab("Chat", "Chat", "rbxassetid://105823588527532")
+    local ChatTab = Window:CreateTab("Chat", "Chat", "rbxassetid://115216752353020")
     local ChatTabPage = ChatTab.Page
     
     --// Deshabilitar el scroll de ChatTab.Page - Solo ChatContainer debe scrollear
@@ -3754,6 +4079,42 @@ function YinYang:CreateWindow(title_text, startTheme)
     	TextXAlignment = Enum.TextXAlignment.Left,
     	LayoutOrder = 1,
     	ZIndex = 11,
+    })
+
+    -- CONTADOR DE USUARIOS ONLINE
+    local OnlineCounter = mk("Frame", {
+        Parent = ChatHeader,
+        Size = UDim2.new(0, 0, 0, 0),
+        Position = UDim2.new(1, -8, 0, 4),
+        AnchorPoint = Vector2.new(1, 0),
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        ZIndex = 12,
+        AutomaticSize = Enum.AutomaticSize.X,
+    })
+
+    local OnlineIcon = mk("ImageLabel", {
+        Parent = OnlineCounter,
+        Size = UDim2.new(0, 18, 0, 18),
+        Position = UDim2.new(0, 0, 0.5, -9),
+        BackgroundTransparency = 1,
+        Image = "rbxassetid://74246983577629",
+        ImageColor3 = Theme.Accent,
+        ScaleType = Enum.ScaleType.Fit,
+        ZIndex = 13,
+    })
+
+    local OnlineLabel = mk("TextLabel", {
+        Parent = OnlineCounter,
+        Size = UDim2.new(0, 40, 0, 18),
+        Position = UDim2.new(0, 22, 0.5, -9),
+        BackgroundTransparency = 1,
+        Text = "...",
+        Font = Enum.Font.GothamBold,
+        TextSize = 12,
+        TextColor3 = Theme.Accent,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        ZIndex = 13,
     })
 
     local HeaderDivider = mk("Frame", {
@@ -4038,17 +4399,19 @@ function YinYang:CreateWindow(title_text, startTheme)
     })
     corner(ConfirmAddBtn, 6)
 
-    -- STICKERS PREDETERMINADOS (assets válidos de Roblox)
+    -- STICKERS PERSONALIZADOS
     local DefaultStickers = {
-        {id = "rbxassetid://7072706796", name = "Fantasma"},
-        {id = "rbxassetid://7072681281", name = "Gato"},
-        {id = "rbxassetid://7072719977", name = "Fuego"},
-        {id = "rbxassetid://7072715372", name = "Corazon"},
-        {id = "rbxassetid://7072731038", name = "Pulgar"},
-        {id = "rbxassetid://7072725716", name = "Risa"},
-        {id = "rbxassetid://7072728610", name = "Sorpresa"},
-        {id = "rbxassetid://7072734716", name = "Triste"},
-        {id = "rbxassetid://7072737562", name = "Enojado"},
+        {id = "rbxassetid://135857695171095", name = "Sonrisa"},
+        {id = "rbxassetid://138363247925206", name = "Llorar"},
+        {id = "rbxassetid://76164124882568", name = "Amor"},
+        {id = "rbxassetid://76164124882568", name = "Corazón"},
+        {id = "rbxassetid://133861773375312", name = "Emoji"},
+        {id = "rbxassetid://109165098870367", name = "Risa"},
+        {id = "rbxassetid://89213081637073", name = "Sorpresa"},
+        {id = "rbxassetid://80817302481160", name = "Triste"},
+        {id = "rbxassetid://72815688632249", name = "Enojado"},
+        {id = "rbxassetid://72602706593283", name = "Wink"},
+        {id = "rbxassetid://129224642026377", name = "Cool"},
     }
 
     -- CARGAR STICKERS CUSTOM GUARDADOS
@@ -4703,9 +5066,19 @@ function YinYang:CreateWindow(title_text, startTheme)
         return StickerBtn
     end
 
-    -- CARGAR DEFAULT STICKERS EN GRID
-    for _, s in ipairs(DefaultStickers) do
-        CreateStickerBtn(StickerGrid, s.id, false)
+    -- CARGAR STICKERS DEL REPO EN GRID
+    -- Usa StickerOrder del repo si LoadStickers() funcionó,
+    -- si no, usa el orden de la tabla embebida como fallback
+    local stickerOrder = StickerOrder or {
+        "Sonrisa","Llorar","Amor","Corazon",
+        "Emoji","Risa","Sorpresa","Triste",
+        "Enojado","Wink","Cool",
+    }
+    for _, name in ipairs(stickerOrder) do
+        local sticker = StickerPalettes[name]
+        if sticker and sticker.Image then
+            CreateStickerBtn(StickerGrid, sticker.Image, false)
+        end
     end
 
     -- CARGAR CUSTOM STICKERS
@@ -4852,6 +5225,320 @@ function YinYang:CreateWindow(title_text, startTheme)
         end
     end)
 
+    --// ════════════════════════════════════════════════════════════════
+    --// TAB: CRÉDITOS (todo en una pantalla, sin scroll)
+    --// ════════════════════════════════════════════════════════════════
+    local TabCreditos = Window:CreateTab("Créditos", "Credits", "rbxassetid://72420970081590")
+    local CredPage = TabCreditos.Page
+
+    CredPage.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    CredPage.CanvasSize = UDim2.new(0, 0, 0, 0)
+    CredPage.ScrollBarThickness = 2
+    CredPage.ScrollingEnabled = true
+
+    local CB  = Theme.Background
+    local CC  = Theme.Secondary
+    local CW  = Theme.Text
+    local CG  = Theme.TextDim
+    local CDG = Theme.Stroke
+    local CGR = Color3.fromRGB(80, 210, 100)
+    local CS  = Theme.Stroke
+
+    -- Frame principal opaco que cubre TODO el fondo
+    --// CredPage necesita fondo opaco para tapar el BackgroundArt del tema
+    CredPage.BackgroundColor3 = CB
+    CredPage.BackgroundTransparency = 0
+
+    local CredRoot = mk("Frame", {
+        Parent = CredPage,
+        Size = UDim2.new(1, 0, 0, 0),
+        BackgroundColor3 = CB,
+        BackgroundTransparency = 0,
+        BorderSizePixel = 0,
+        ClipsDescendants = false,
+        ZIndex = 10,
+        AutomaticSize = Enum.AutomaticSize.Y,
+    })
+
+    mk("UIListLayout", {
+        Parent = CredRoot,
+        Padding = UDim.new(0, 7),
+        SortOrder = Enum.SortOrder.LayoutOrder,
+        HorizontalAlignment = Enum.HorizontalAlignment.Center,
+    })
+
+    mk("UIPadding", {
+        Parent = CredRoot,
+        PaddingTop = UDim.new(0, 8),
+        PaddingLeft = UDim.new(0, 10),
+        PaddingRight = UDim.new(0, 10),
+        PaddingBottom = UDim.new(0, 8),
+    })
+
+    --// HEADER (84px)
+    local CR_Header = mk("Frame", {
+        Parent = CredRoot,
+        Size = UDim2.new(1, 0, 0, 84),
+        BackgroundColor3 = CC,
+        BackgroundTransparency = 0,
+        BorderSizePixel = 0,
+        LayoutOrder = 1, ZIndex = 10,
+    })
+    corner(CR_Header, 10)
+    mk("UIStroke", { Parent = CR_Header, Thickness = 1, Color = CS })
+
+    local CR_BackImg = mk("ImageLabel", {
+        Parent = CR_Header,
+        Size = UDim2.new(1, 0, 1, 0),
+        BackgroundTransparency = 1,
+        Image = "rbxassetid://125311226076728",
+        ImageTransparency = 0.55,
+        ScaleType = Enum.ScaleType.Crop,
+        ZIndex = 10,
+    })
+    corner(CR_BackImg, 10)
+
+    local CR_Overlay = mk("Frame", {
+        Parent = CR_Header,
+        Size = UDim2.new(1, 0, 1, 0),
+        BackgroundColor3 = CC,
+        BackgroundTransparency = 0.55,
+        BorderSizePixel = 0,
+        ZIndex = 11,
+    })
+    corner(CR_Overlay, 10)
+
+    local CR_TitleLabel = mk("TextLabel", {
+        Parent = CR_Header, Size = UDim2.new(0.6, 0, 0, 28),
+        Position = UDim2.new(0, 12, 0, 8),
+        BackgroundTransparency = 1, Text = GetText("Créditos", "Credits"),
+        Font = Enum.Font.GothamBold, TextSize = 22,
+        TextColor3 = CW, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 13,
+    })
+    CR_TitleLabel:SetAttribute("TextSpanish", "Créditos")
+    CR_TitleLabel:SetAttribute("TextEnglish", "Credits")
+
+    mk("Frame", {
+        Parent = CR_Header, Size = UDim2.new(0, 48, 0, 2),
+        Position = UDim2.new(0, 12, 0, 38),
+        BackgroundColor3 = CW, BorderSizePixel = 0, ZIndex = 13,
+    })
+
+    local CR_SubLabel = mk("TextLabel", {
+        Parent = CR_Header, Size = UDim2.new(0.55, 0, 0, 36),
+        Position = UDim2.new(0, 12, 0, 44),
+        BackgroundTransparency = 1,
+        Text = GetText("Gracias por usar Yin Yang v28.\nHecho con dedicación para la comunidad.",
+                       "Thank you for using Yin Yang v28.\nMade with dedication for the community."),
+        Font = Enum.Font.Gotham, TextSize = 11,
+        TextColor3 = CG, TextXAlignment = Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Top, TextWrapped = true, ZIndex = 13,
+    })
+    CR_SubLabel:SetAttribute("TextSpanish", "Gracias por usar Yin Yang v28.\nHecho con dedicación para la comunidad.")
+    CR_SubLabel:SetAttribute("TextEnglish", "Thank you for using Yin Yang v28.\nMade with dedication for the community.")
+
+    mk("ImageLabel", {
+        Parent = CR_Header, Size = UDim2.new(0, 82, 0, 82),
+        Position = UDim2.new(1, -88, 0, 1),
+        BackgroundTransparency = 1, Image = "rbxassetid://117780544348814",
+        ScaleType = Enum.ScaleType.Fit, ZIndex = 14,
+    })
+
+    --// LABEL DESARROLLADOR (18px)
+    local CR_DevLbl = mk("Frame", {
+        Parent = CredRoot, Size = UDim2.new(1, 0, 0, 18),
+        BackgroundTransparency = 1, LayoutOrder = 2, ZIndex = 10,
+    })
+    mk("ImageLabel", {
+        Parent = CR_DevLbl, Size = UDim2.new(0, 14, 0, 14),
+        Position = UDim2.new(0, 2, 0.5, -7),
+        BackgroundTransparency = 1, Image = "rbxassetid://131335187671764",
+        ImageColor3 = CG, ScaleType = Enum.ScaleType.Fit, ZIndex = 11,
+    })
+    local CR_DevLblText = mk("TextLabel", {
+        Parent = CR_DevLbl, Size = UDim2.new(1, -22, 1, 0),
+        Position = UDim2.new(0, 22, 0, 0),
+        BackgroundTransparency = 1, Text = GetText("Desarrollador", "Developer"),
+        Font = Enum.Font.GothamBold, TextSize = 12,
+        TextColor3 = CG, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 11,
+    })
+    CR_DevLblText:SetAttribute("TextSpanish", "Desarrollador")
+    CR_DevLblText:SetAttribute("TextEnglish", "Developer")
+
+    --// CARD DEV (82px)
+    local CR_DevCard = mk("Frame", {
+        Parent = CredRoot, Size = UDim2.new(1, 0, 0, 82),
+        BackgroundColor3 = CC, BackgroundTransparency = 0,
+        BorderSizePixel = 0, LayoutOrder = 3, ZIndex = 10,
+    })
+    corner(CR_DevCard, 10)
+    mk("UIStroke", { Parent = CR_DevCard, Thickness = 1, Color = CS })
+
+    local CR_Avatar = mk("ImageLabel", {
+        Parent = CR_DevCard, Size = UDim2.new(0, 64, 0, 64),
+        Position = UDim2.new(0, 12, 0.5, -32),
+        BackgroundColor3 = Color3.fromRGB(30, 30, 35),
+        BorderSizePixel = 0, Image = "rbxassetid://125311226076728",
+        ScaleType = Enum.ScaleType.Crop, ZIndex = 11,
+    })
+    corner(CR_Avatar, 8)
+    mk("UIStroke", { Parent = CR_Avatar, Thickness = 1, Color = CS })
+
+    mk("Frame", {
+        Parent = CR_DevCard, Size = UDim2.new(0, 1, 0, 58),
+        Position = UDim2.new(0, 88, 0.5, -29),
+        BackgroundColor3 = CS, BorderSizePixel = 0, ZIndex = 11,
+    })
+
+    mk("TextLabel", {
+        Parent = CR_DevCard, Size = UDim2.new(1, -102, 0, 22),
+        Position = UDim2.new(0, 98, 0, 10),
+        BackgroundTransparency = 1, Text = "Nick",
+        Font = Enum.Font.GothamBold, TextSize = 16,
+        TextColor3 = CW, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 11,
+    })
+    local CR_DevRole = mk("TextLabel", {
+        Parent = CR_DevCard, Size = UDim2.new(1, -102, 0, 16),
+        Position = UDim2.new(0, 98, 0, 33),
+        BackgroundTransparency = 1, Text = GetText("Desarrollador Principal", "Lead Developer"),
+        Font = Enum.Font.Gotham, TextSize = 12,
+        TextColor3 = CG, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 11,
+    })
+    CR_DevRole:SetAttribute("TextSpanish", "Desarrollador Principal")
+    CR_DevRole:SetAttribute("TextEnglish", "Lead Developer")
+
+    local CR_DevDesc = mk("TextLabel", {
+        Parent = CR_DevCard, Size = UDim2.new(1, -102, 0, 28),
+        Position = UDim2.new(0, 98, 0, 50),
+        BackgroundTransparency = 1,
+        Text = GetText("Creador de Yin Yang v28\nApasionado por la programación y la comunidad.",
+                       "Creator of Yin Yang v28\nPassionate about programming and the community."),
+        Font = Enum.Font.Gotham, TextSize = 10,
+        TextColor3 = CDG, TextXAlignment = Enum.TextXAlignment.Left,
+        TextWrapped = true, ZIndex = 11,
+    })
+    CR_DevDesc:SetAttribute("TextSpanish", "Creador de Yin Yang v28\nApasionado por la programación y la comunidad.")
+    CR_DevDesc:SetAttribute("TextEnglish", "Creator of Yin Yang v28\nPassionate about programming and the community.")
+
+    --// CARD DISCORD (86px)
+    local CR_DC = mk("Frame", {
+        Parent = CredRoot, Size = UDim2.new(1, 0, 0, 86),
+        BackgroundColor3 = CC, BackgroundTransparency = 0,
+        BorderSizePixel = 0, LayoutOrder = 4, ZIndex = 10,
+    })
+    corner(CR_DC, 10)
+    mk("UIStroke", { Parent = CR_DC, Thickness = 1, Color = CS })
+
+    mk("ImageLabel", {
+        Parent = CR_DC, Size = UDim2.new(0, 19, 0, 19),
+        Position = UDim2.new(0, 12, 0, 10),
+        BackgroundTransparency = 1, Image = "rbxassetid://132202203337109",
+        ImageColor3 = CW, ScaleType = Enum.ScaleType.Fit, ZIndex = 11,
+    })
+    local CR_DCTitle = mk("TextLabel", {
+        Parent = CR_DC, Size = UDim2.new(1, -42, 0, 20),
+        Position = UDim2.new(0, 37, 0, 9),
+        BackgroundTransparency = 1, Text = GetText("Únete a nuestro Discord", "Join our Discord"),
+        Font = Enum.Font.GothamBold, TextSize = 13,
+        TextColor3 = CW, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 11,
+    })
+    CR_DCTitle:SetAttribute("TextSpanish", "Únete a nuestro Discord")
+    CR_DCTitle:SetAttribute("TextEnglish", "Join our Discord")
+
+    mk("Frame", {
+        Parent = CR_DC, Size = UDim2.new(1, -24, 0, 1),
+        Position = UDim2.new(0, 12, 0, 33),
+        BackgroundColor3 = CS, BorderSizePixel = 0, ZIndex = 11,
+    })
+
+    local CR_DCDesc = mk("TextLabel", {
+        Parent = CR_DC, Size = UDim2.new(0.5, 0, 0, 44),
+        Position = UDim2.new(0, 12, 0, 38),
+        BackgroundTransparency = 1,
+        Text = GetText("Forma parte de nuestra comunidad para recibir soporte, actualizaciones y mucho más.",
+                       "Join our community to receive support, updates and much more."),
+        Font = Enum.Font.Gotham, TextSize = 10,
+        TextColor3 = CG, TextXAlignment = Enum.TextXAlignment.Left,
+        TextWrapped = true, ZIndex = 11,
+    })
+    CR_DCDesc:SetAttribute("TextSpanish", "Forma parte de nuestra comunidad para recibir soporte, actualizaciones y mucho más.")
+    CR_DCDesc:SetAttribute("TextEnglish", "Join our community to receive support, updates and much more.")
+
+    local CR_CopyBtn = mk("TextButton", {
+        Parent = CR_DC, Size = UDim2.new(0, 106, 0, 38),
+        Position = UDim2.new(1, -118, 0.5, -4),
+        BackgroundColor3 = Color3.fromRGB(12, 12, 15),
+        BackgroundTransparency = 0, BorderSizePixel = 0,
+        Text = "", ZIndex = 12,
+    })
+    corner(CR_CopyBtn, 19)
+    mk("UIStroke", { Parent = CR_CopyBtn, Thickness = 1.5, Color = CW })
+    mk("ImageLabel", {
+        Parent = CR_CopyBtn, Size = UDim2.new(0, 16, 0, 16),
+        Position = UDim2.new(0, 10, 0.5, -8),
+        BackgroundTransparency = 1, Image = "rbxassetid://127734233169485",
+        ImageColor3 = CW, ScaleType = Enum.ScaleType.Fit, ZIndex = 13,
+    })
+    local CR_CopyLabel = mk("TextLabel", {
+        Parent = CR_CopyBtn, Size = UDim2.new(1, -32, 1, 0),
+        Position = UDim2.new(0, 30, 0, 0),
+        BackgroundTransparency = 1, Text = GetText("Copiar", "Copy"),
+        Font = Enum.Font.GothamBold, TextSize = 13,
+        TextColor3 = CW, ZIndex = 13,
+    })
+    CR_CopyLabel:SetAttribute("TextSpanish", "Copiar")
+    CR_CopyLabel:SetAttribute("TextEnglish", "Copy")
+
+    local CR_Copied = mk("TextLabel", {
+        Parent = CR_DC, Size = UDim2.new(0, 148, 0, 13),
+        Position = UDim2.new(1, -158, 1, -15),
+        BackgroundTransparency = 1, Text = "",
+        Font = Enum.Font.Gotham, TextSize = 10,
+        TextColor3 = CGR, TextXAlignment = Enum.TextXAlignment.Right, ZIndex = 12,
+    })
+
+    CR_CopyBtn.MouseButton1Click:Connect(function()
+        pcall(function() setclipboard("https://discord.gg/KAtgYysjp") end)
+        CR_Copied.Text = GetText("✓ Link copiado al portapapeles", "✓ Link copied to clipboard")
+        task.delay(3, function()
+            if CR_Copied and CR_Copied.Parent then CR_Copied.Text = "" end
+        end)
+    end)
+
+    --// FOOTER (28px)
+    local CR_Footer = mk("Frame", {
+        Parent = CredRoot, Size = UDim2.new(1, 0, 0, 28),
+        BackgroundTransparency = 1, LayoutOrder = 5, ZIndex = 10,
+    })
+
+    mk("Frame", {
+        Parent = CR_Footer, Size = UDim2.new(0.38, 0, 0, 1),
+        Position = UDim2.new(0, 0, 0, 8),
+        BackgroundColor3 = CS, BorderSizePixel = 0, ZIndex = 11,
+    })
+    mk("Frame", {
+        Parent = CR_Footer, Size = UDim2.new(0.38, 0, 0, 1),
+        Position = UDim2.new(0.62, 0, 0, 8),
+        BackgroundColor3 = CS, BorderSizePixel = 0, ZIndex = 11,
+    })
+    mk("ImageLabel", {
+        Parent = CR_Footer, Size = UDim2.new(0, 14, 0, 14),
+        Position = UDim2.new(0.5, -7, 0, 1),
+        BackgroundTransparency = 1, Image = "rbxassetid://132202203337109",
+        ImageColor3 = CDG, ScaleType = Enum.ScaleType.Fit, ZIndex = 12,
+    })
+    local CR_FooterText = mk("TextLabel", {
+        Parent = CR_Footer, Size = UDim2.new(1, 0, 0, 13),
+        Position = UDim2.new(0, 0, 0, 15),
+        BackgroundTransparency = 1,
+        Text = GetText("© 2026 Yin Yang | Script Hub  •  Todos los derechos reservados.",
+                       "© 2026 Yin Yang | Script Hub  •  All rights reserved."),
+        Font = Enum.Font.Gotham, TextSize = 9,
+        TextColor3 = CDG, TextXAlignment = Enum.TextXAlignment.Center, ZIndex = 11,
+    })
+    CR_FooterText:SetAttribute("TextSpanish", "© 2026 Yin Yang | Script Hub  •  Todos los derechos reservados.")
+    CR_FooterText:SetAttribute("TextEnglish", "© 2026 Yin Yang | Script Hub  •  All rights reserved.")
+
     return Window
 
 end
@@ -4927,7 +5614,39 @@ if DEMO_ACTIVO then
     TabFeatures:CreateFloatingToggle("GodMode", false, function(state)
         print("GodMode: " .. (state and "ON" or "OFF"))
     end)
-    
+
+    --// ========================================================
+    --// SECCIÓN: SLIDERS PREMIUM v2.0 (TESTING & SHOWCASE)
+    --// ========================================================
+    TabFeatures:CreateDivider()
+    TabFeatures:CreateLabel("Sliders Premium v2.0 🚀", 14)
+    TabFeatures:CreateDivider()
+
+    --// SLIDER 1: TELEPORT SPEED
+    local SliderTeleportSpeed = TabFeatures:CreateSlider("Teleport Speed", 1.0, 100.0, 23.1, function(val)
+        print("🚀 Teleport Speed: " .. string.format("%.2f", val))
+    end)
+
+    --// SLIDER 2: JUMP HEIGHT
+    local SliderJumpHeight = TabFeatures:CreateSlider("Jump Height", 10.0, 300.0, 139.24, function(val)
+        print("⬆️  Jump Height: " .. string.format("%.2f", val))
+    end)
+
+    --// SLIDER 3: SPEED MULTIPLIER
+    local SliderSpeed = TabFeatures:CreateSlider("Speed Multiplier", 0.5, 3.0, 1.5, function(val)
+        print("💨 Speed: " .. string.format("%.2f", val) .. "x")
+    end)
+
+    --// SLIDER 4: FOV (Field of View)
+    local SliderFOV = TabFeatures:CreateSlider("FOV", 30, 120, 70, function(val)
+        print("👁️  FOV: " .. string.format("%.0f", val))
+    end)
+
+    --// SLIDER 5: VOLUME
+    local SliderVolume = TabFeatures:CreateSlider("Volume", 0, 1.0, 0.5, function(val)
+        print("🔊 Volume: " .. string.format("%.1f%%", val * 100))
+    end)
+
     print("\n DEMO v24 INICIADA")
     print("TABS: Inicio (Protegida) | Temas (16 colores sin duplicados) | Features | Dropdowns | Efectos")
     print(" MEJORAS: Sin duplicados, Pestañas permanentes, Efectos de texto mejorados")
