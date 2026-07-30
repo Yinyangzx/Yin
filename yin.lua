@@ -15,7 +15,7 @@
     1. LOGO YIN-YANG ROTATIVO: Logo animado que gira continuamente
     2. SONIDOS INTEGRADOS:
        - Click al activar/desactivar (138567614125924)
-       - Dragón aleatorio cuando está cerrado (7127123554) - cada 15 segundos, volumen reducido
+       - Dragón aleatorio cuando est)á cerrado (7127123554) - cada 15 segundos, volumen reducido
     3. TOGGLES FLOTANTES: 
        - Pueden desprenderse de la UI principal
        - Se pueden fijar (+) o soltar (-) 
@@ -116,7 +116,7 @@ local function ChangeLanguage(newLanguage)
 end
 
 local function SaveLanguageConfig()
-    pcall(function()
+    pcall(function(
         if writefile then
             local configJson = HttpService:JSONEncode(LanguageSystem.Config)
             writefile("yin_yang_language_config.json", configJson)
@@ -3386,36 +3386,67 @@ function YinYang:CreateWindow(title_text, startTheme)
         end
         
         self.CurrentTheme = themeName
-        CurrentTheme = themeName  --  v26: Actualizar variable global
+        CurrentTheme = themeName
 
         for _, obj in ipairs(Main:GetDescendants()) do
             swapThemeColor(obj, Theme)
         end
 
-        -- 🔧 RESETEAR TODOS LOS COLORES DE TEXTO AL NUEVO TEMA
         applyTextColorToAll(Theme.Text)
+
+        --// CANCELAR SLIDESHOW ANTERIOR (token system)
+        self._slideshowToken = (self._slideshowToken or 0) + 1
 
         if BackgroundArt then
             pcall(function()
-                BackgroundArt.Image = ThemeBackgroundImages[themeName] or ""
-                print(" Imagen de fondo actualizada")
+                --// Prioridad 1: ThemeStore externo
+                local themeData = ThemeStore and ThemeStore.Themes and ThemeStore.Themes[themeName]
+
+                if themeData and themeData.Images and #themeData.Images > 1 then
+                    --// TEMA CON SLIDESHOW
+                    local token = self._slideshowToken
+                    local images = themeData.Images
+                    local interval = tonumber(themeData.ImageInterval) or 5
+
+                    BackgroundArt.Image = images[1]
+
+                    task.spawn(function()
+                        local i = 1
+                        while self._slideshowToken == token do
+                            task.wait(interval)
+                            if self._slideshowToken ~= token then break end
+                            i = (i % #images) + 1
+                            if BackgroundArt and BackgroundArt.Parent then
+                                BackgroundArt.Image = images[i]
+                            end
+                        end
+                    end)
+                else
+                    --// TEMA NORMAL (una sola imagen)
+                    local bg = (themeData and themeData.Background) or ThemeBackgroundImages[themeName] or ""
+                    BackgroundArt.Image = bg
+                end
+
+                print("Imagen de fondo actualizada")
             end)
         end
 
-        --// 💾 v26: GUARDAR CONFIGURACIÓN AUTOMÁTICAMENTE
         SavedConfig.CurrentTheme = themeName
         SaveConfig()
 
-        --//  v26: SONIDO DE CLICK DINÁMICO POR TEMA
-        if ThemeClickSounds[themeName] then
+        --// SONIDO DE CLICK DINÁMICO
+        local themeData = ThemeStore and ThemeStore.Themes and ThemeStore.Themes[themeName]
+        if themeData and themeData.Sound then
+            CurrentClickSound = themeData.Sound
+        elseif ThemeClickSounds[themeName] then
             CurrentClickSound = ThemeClickSounds[themeName]
-            print(" Tema " .. themeName .. " - Sonido de click personalizado activado")
+            print("Tema " .. themeName .. " - Sonido de click personalizado activado")
         else
             CurrentClickSound = Sounds.Click
         end
 
-        --// SISTEMA DE EFECTO DINÁMICO POR TEMA (desde ThemeAutoEffects)
-        local autoEffect = ThemeAutoEffects[themeName]
+        --// EFECTO DINÁMICO POR TEMA
+        local autoEffect = (themeData and themeData.Effect) or ThemeAutoEffects[themeName]
         if autoEffect and autoEffect ~= "Off" then
             self:SetTextEffect(autoEffect)
         else
@@ -3424,7 +3455,6 @@ function YinYang:CreateWindow(title_text, startTheme)
         
         CurrentTheme = themeName
 
-        -- Actualizar efecto de brillo animado con el nuevo color de acento
         buildAnimatedBorder(Main, Theme.Accent, UDim.new(0, 10))
 
         -- Actualizar efecto en floating toggles activos
@@ -3742,15 +3772,15 @@ function YinYang:CreateWindow(title_text, startTheme)
     AutoTabEfectos:CreateLabel("Efectos de Texto", "Text Effects", 14)
     AutoTabEfectos:CreateDivider()
     
-    AutoTabEfectos:CreateButton("⚪ Normal (Blanco)", "⚪ Normal (White)", function()
+    AutoTabEfectos:CreateButton(" Normal (Blanco)", " Normal (White)", function()
         Window:SetTextEffect("Off")
     end)
     
-    AutoTabEfectos:CreateButton("💫 Blanco-Celeste", "💫 White-Cyan", function()
+    AutoTabEfectos:CreateButton(" Blanco-Celeste", " White-Cyan", function()
         Window:SetTextEffect("WhiteCyan")
     end)
     
-    AutoTabEfectos:CreateButton("💗 Blanco-Rosa", "💗 White-Pink", function()
+    AutoTabEfectos:CreateButton(" Blanco-Rosa", " White-Pink", function()
         Window:SetTextEffect("WhitePink")
     end)
     
