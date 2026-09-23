@@ -2889,7 +2889,7 @@ function YinYang:CreateWindow(title_text, startTheme)
 
     local BoomboxPill = mk("Frame", {
         Size = UDim2.new(0, 155, 0, 28),
-        Position = UDim2.new(0.5, -77, 0.5, -14),
+        Position = UDim2.new(0.5, -77, 0.5, -18),
         BackgroundColor3 = Color3.fromRGB(5, 5, 8),
         BackgroundTransparency = 0,
         ZIndex = 10,
