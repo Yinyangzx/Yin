@@ -7506,7 +7506,7 @@ function YinYang:CreateWindow(title_text, startTheme)
                 BorderSizePixel = 0,
                 ClipsDescendants = true,
                 ZIndex = 9
-            }, TabPage)
+            }, contentParent)
             corner(BtnWrapper, 6)
 
             local Btn = mk("TextButton", {
