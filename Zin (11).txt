@@ -4598,6 +4598,41 @@ function YinYang:CreateWindow(title_text, startTheme)
             return Container
         end
 
+        local function refreshTabScroll()
+            if not TabPage or not TabPage.Parent then return end
+
+            local layout = TabPage:FindFirstChildOfClass("UIListLayout")
+            if not layout then return end
+
+            local contentHeight = math.max(0, layout.AbsoluteContentSize.Y)
+            local viewportHeight = math.max(0, TabPage.AbsoluteSize.Y)
+            local maxY = math.max(0, contentHeight - viewportHeight)
+
+            if TabPage.CanvasPosition.Y > maxY then
+                TabPage.CanvasPosition = Vector2.new(0, maxY)
+            end
+
+            -- Fuerza una medida válida después de que un contenido interno
+            -- (por ejemplo UIGridLayout) termine de calcular su tamaño.
+            TabPage.CanvasSize = UDim2.new(0, 0, 0, contentHeight)
+        end
+
+        local canvasCorrection = false
+        TabPage:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
+            if canvasCorrection then return end
+            if not TabPage.Parent then return end
+
+            local layout = TabPage:FindFirstChildOfClass("UIListLayout")
+            if not layout then return end
+
+            local maxY = math.max(0, layout.AbsoluteContentSize.Y - TabPage.AbsoluteSize.Y)
+            if TabPage.CanvasPosition.Y > maxY then
+                canvasCorrection = true
+                TabPage.CanvasPosition = Vector2.new(0, maxY)
+                canvasCorrection = false
+            end
+        end)
+
         local function Select()
             for _, t in pairs(Window.Tabs) do
                 t.Page.Visible = false
@@ -4606,11 +4641,14 @@ function YinYang:CreateWindow(title_text, startTheme)
             end
             TabPage.Visible = true
             TabPage.CanvasPosition = Vector2.new(0, 0)
+
+            -- Dos defer permiten que los layouts anidados (UIGridLayout,
+            -- AutomaticSize, etc.) terminen de calcularse al mostrar una pestaña.
             task.defer(function()
-                if TabPage and TabPage.Parent then
-                    TabPage.CanvasPosition = Vector2.new(0, 0)
-                end
+                refreshTabScroll()
+                task.defer(refreshTabScroll)
             end)
+
             TabButton.TextColor3 = Theme.AccentText
             TabButton.BackgroundColor3 = Theme.Accent
             if Window._RefreshCompactNavigation then Window._RefreshCompactNavigation() end
@@ -8203,6 +8241,28 @@ function YinYang:CreateWindow(title_text, startTheme)
 
             refreshSelection()
             resetScrollTop(TabPage)
+
+            -- El UIGridLayout puede tener tamaño 0 mientras la pestaña o el
+            -- contenedor del carrusel están ocultos. Sincronizarlo también cuando
+            -- cambia su tamaño hace que el contenido móvil aparezca al instante
+            -- al volver a ser visible, sin depender de cambiar de pestaña.
+            local gridLayout = GridHolder:FindFirstChildOfClass("UIGridLayout")
+            if gridLayout then
+                local function syncGridHolderSize()
+                    if not GridHolder or not GridHolder.Parent then return end
+                    local gridHeight = math.max(0, gridLayout.AbsoluteContentSize.Y)
+                    GridHolder.Size = UDim2.new(1, 0, 0, gridHeight)
+                end
+
+                gridLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(syncGridHolderSize)
+                GridHolder:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+                    task.defer(syncGridHolderSize)
+                end)
+
+                task.defer(function()
+                    task.defer(syncGridHolderSize)
+                end)
+            end
 
             return {
                 Holder = GridHolder,
