@@ -1430,29 +1430,46 @@ local CLASSIC_REPO_BASE = "https://raw.githubusercontent.com/Yinyangzx/yin-class
 local CLASSIC_MANIFEST_URL = "https://raw.githubusercontent.com/Yinyangzx/yin-classic/refs/heads/main/manifest_UPLOAD"
 
 local function LoadClassicManifest()
+    local fallback = {
+        { es = "Ocultar GUIs", en = "Hide GUIs", file = "YinYang_ClassicOptions.lua", key = "HideGuis" },
+        { es = "Ajustar FOV", en = "Adjust FOV", file = "YinYang_ClassicOptions.lua", key = "FOVAdjust" },
+        { es = "Waypoint", en = "Waypoint", file = "YinYang_ClassicOptions.lua", key = "Waypoint" },
+        { es = "Optimizar Rendimiento", en = "Performance Optimizer", file = "YinYang_ClassicOptions.lua", key = "PerformanceOptimizer" },
+        { es = "Estadísticas (FPS/Ping)", en = "Stats (FPS/Ping)", file = "YinYang_ClassicOptions.lua", key = "StatsHUD" },
+    }
+
     local dlOk, rawData = pcall(function()
         return game:HttpGet(CLASSIC_MANIFEST_URL, true)
     end)
     if not (dlOk and type(rawData) == "string" and #rawData > 10) then
-        print("[YinYang Classic] ❌ No se pudo descargar el manifest; la pestaña quedará vacía")
-        return {}
+        print("[YinYang Classic] ⚠️ No se pudo descargar el manifest; usando el catálogo de respaldo")
+        return fallback
     end
 
     local parseOk, data = pcall(function()
-        return loadstring(rawData)()
+        local chunk = loadstring(rawData)
+        if type(chunk) ~= "function" then
+            error("loadstring no devolvió una función")
+        end
+        return chunk()
     end)
     rawData = nil
     if not (parseOk and type(data) == "table") then
-        print("[YinYang Classic] ❌ Error al parsear el manifest")
-        return {}
+        print("[YinYang Classic] ⚠️ Error al parsear el manifest; usando el catálogo de respaldo")
+        return fallback
     end
 
     local count = 0
     for _, entry in ipairs(data) do
-        if type(entry) == "table" then
+        if type(entry) == "table" and entry.es and entry.en and entry.file and entry.key then
             count = count + 1
         end
     end
+    if count == 0 then
+        print("[YinYang Classic] ⚠️ Manifest vacío o inválido; usando el catálogo de respaldo")
+        return fallback
+    end
+
     print("[YinYang Classic] ✅ " .. count .. " scripts externos en el manifest")
     return data
 end
@@ -3025,7 +3042,7 @@ function YinYang:CreateWindow(title_text, startTheme)
             Parent = Main,
             AnchorPoint = Vector2.new(0.5, 0),
             Size = UDim2.new(0.72, 0, 0, 17),
-            Position = UDim2.new(0.5, 0, 0, 34),
+            Position = UDim2.new(0.5, 0, 0, 39),
             BackgroundTransparency = 1,
             Text = SUBTEXT_MESSAGES[1],
             TextColor3 = Color3.new(0, 0, 0),
@@ -7698,7 +7715,7 @@ function YinYang:CreateWindow(title_text, startTheme)
                 BackgroundTransparency = 0.78,
                 ClipsDescendants = true,
                 ZIndex = 9
-            }, TabPage)
+            })
             Holder:SetAttribute("ThemeRole", "Secondary")
             corner(Holder, 12)
             local HolderStroke = stroke(Holder, Theme.Stroke, 1, 0.55)
