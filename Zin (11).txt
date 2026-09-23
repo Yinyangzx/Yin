@@ -2871,13 +2871,13 @@ function YinYang:CreateWindow(title_text, startTheme)
     ):Play()
 
     local TitleLabel = mk("TextLabel", {
-        Size = UDim2.new(0, 120, 1, 0),
+        Size = UDim2.new(0, 145, 1, 0),
         Position = UDim2.new(0, 15, 0, 0),
         BackgroundTransparency = 1,
         Text = title_text or "ZERO UI",
         TextColor3 = Theme.Text,
         Font = Enum.Font.GothamBold,
-        TextSize = 16,
+        TextSize = 18,
         TextXAlignment = Enum.TextXAlignment.Left,
         ZIndex = 7
     }, TopBar)
@@ -2889,7 +2889,7 @@ function YinYang:CreateWindow(title_text, startTheme)
 
     local BoomboxPill = mk("Frame", {
         Size = UDim2.new(0, 155, 0, 28),
-        Position = UDim2.new(0.5, -77, 0.5, -14),
+        Position = UDim2.new(0.5, -77, 0.5, -17),
         BackgroundColor3 = Color3.fromRGB(5, 5, 8),
         BackgroundTransparency = 0,
         ZIndex = 10,
@@ -3025,7 +3025,7 @@ function YinYang:CreateWindow(title_text, startTheme)
             Parent = Main,
             AnchorPoint = Vector2.new(0.5, 0),
             Size = UDim2.new(0.72, 0, 0, 17),
-            Position = UDim2.new(0.5, 0, 0, 38),
+            Position = UDim2.new(0.5, 0, 0, 34),
             BackgroundTransparency = 1,
             Text = SUBTEXT_MESSAGES[1],
             TextColor3 = Color3.new(0, 0, 0),
@@ -4528,6 +4528,59 @@ function YinYang:CreateWindow(title_text, startTheme)
 
         local Tab = {Button = TabButton, Page = TabPage, NameSpanish = nameSpanish, NameEnglish = nameEnglish, IconAsset = iconAsset}
 
+        --// CONTENEDOR DE CONTENIDO — permite a scripts externos construir el contenido
+        --// dentro de un Frame propio (por ejemplo, dos páginas PC/Mobile de un carrusel)
+        --// sin crear los controles y luego moverlos de Parent.
+        --// Por defecto se mantiene exactamente el comportamiento anterior: TabPage.
+        local contentParent = TabPage
+
+        function Tab:GetContentContainer()
+            return contentParent
+        end
+
+        function Tab:SetContentContainer(container)
+            if container == nil then
+                contentParent = TabPage
+                return self
+            end
+            if typeof(container) ~= "Instance" or not container:IsA("GuiObject") then
+                warn("[YinYang] SetContentContainer: se esperaba un GuiObject; se mantiene TabPage")
+                contentParent = TabPage
+                return self
+            end
+            contentParent = container
+            return self
+        end
+
+        function Tab:ResetContentContainer()
+            contentParent = TabPage
+            return self
+        end
+
+        function Tab:CreateContentContainer(name, parent)
+            parent = parent or TabPage
+            if typeof(parent) ~= "Instance" or not parent:IsA("GuiObject") then
+                parent = TabPage
+            end
+
+            local Container = mk("Frame", {
+                Name = tostring(name or "ContentContainer"),
+                Size = UDim2.new(1, 0, 0, 0),
+                AutomaticSize = Enum.AutomaticSize.Y,
+                BackgroundTransparency = 1,
+                BorderSizePixel = 0,
+                ZIndex = 9,
+            }, parent)
+
+            mk("UIListLayout", {
+                Padding = UDim.new(0, 6),
+                SortOrder = Enum.SortOrder.LayoutOrder,
+                VerticalAlignment = Enum.VerticalAlignment.Top,
+            }, Container)
+
+            return Container
+        end
+
         local function Select()
             for _, t in pairs(Window.Tabs) do
                 t.Page.Visible = false
@@ -5232,7 +5285,7 @@ function YinYang:CreateWindow(title_text, startTheme)
             --// Altura aumentada (64 -> 80) para dar lugar a la fila de botones
             --// Desprender/Candado, igual que en CreateFloatingToggle.
             local Holder = mk("Frame", {
-                Parent = TabPage,
+                Parent = contentParent,
                 Size = UDim2.new(1, 0, 0, 80),
                 BackgroundColor3 = Theme.Secondary,
                 BackgroundTransparency = 0.7,
@@ -5656,7 +5709,7 @@ function YinYang:CreateWindow(title_text, startTheme)
 
             --// ── CONTENEDOR PRINCIPAL ──────────────────────────────────────────────
             local Holder = mk("Frame", {
-                Parent = TabPage,
+                Parent = contentParent,
                 Size = UDim2.new(1, 0, 0, holderH),
                 BackgroundColor3 = Theme.Secondary,
                 BackgroundTransparency = 0.78,
@@ -5959,7 +6012,7 @@ function YinYang:CreateWindow(title_text, startTheme)
 
             --// ── CONTENEDOR PRINCIPAL (misma tarjeta que CreateToggle) ───────────────
             local Holder = mk("Frame", {
-                Parent = TabPage,
+                Parent = contentParent,
                 Size = UDim2.new(1, 0, 0, 64),
                 BackgroundColor3 = Theme.Secondary,
                 BackgroundTransparency = 0.78,
@@ -6417,7 +6470,7 @@ function YinYang:CreateWindow(title_text, startTheme)
 
             --// ── FILA EN PESTAÑA ──────────────────────────────────────────────────────
             local Holder = mk("Frame", {
-                Parent = TabPage,
+                Parent = contentParent,
                 Size   = UDim2.new(1, 0, 0, 64),
                 BackgroundColor3 = Theme.Secondary,
                 BackgroundTransparency = 0.78,
@@ -6829,7 +6882,7 @@ function YinYang:CreateWindow(title_text, startTheme)
             --// los sliders consecutivos pertenecen al mismo carrusel; cualquier
             --// opción/elemento intermedio inicia su propio carrusel en su posición.
             local Carousel = nil
-            local children = TabPage:GetChildren()
+            local children = contentParent:GetChildren()
             for i = #children, 1, -1 do
                 local child = children[i]
                 if child:IsA("GuiObject") then
@@ -6843,7 +6896,7 @@ function YinYang:CreateWindow(title_text, startTheme)
 
             if not Carousel then
                 local SliderSection = mk("Frame", {
-                    Parent = TabPage,
+                    Parent = contentParent,
                     Size = UDim2.new(1, 0, 0, 134),
                     BackgroundTransparency = 1,
                     BorderSizePixel = 0,
@@ -7639,7 +7692,7 @@ function YinYang:CreateWindow(title_text, startTheme)
 
             --// ── CARD PRINCIPAL ─────────────────────────────────────────────────
             local Holder = mk("Frame", {
-                Parent = TabPage,
+                Parent = contentParent,
                 Size = UDim2.new(1, 0, 0, 68),
                 BackgroundColor3 = Theme.Secondary,
                 BackgroundTransparency = 0.78,
@@ -7967,7 +8020,7 @@ function YinYang:CreateWindow(title_text, startTheme)
             local displayText = GetText(textSpanish, textEnglish)
             
             local Label = mk("TextLabel", {
-                Parent = TabPage,
+                Parent = contentParent,
                 Size = UDim2.new(1, 0, 0, 0),
                 AutomaticSize = Enum.AutomaticSize.Y,
                 BackgroundTransparency = 1,
@@ -7992,7 +8045,7 @@ function YinYang:CreateWindow(title_text, startTheme)
                 return nil
             end
             local Divider = mk("Frame", {
-                Parent = TabPage,
+                Parent = contentParent,
                 Size = UDim2.new(1, 0, 0, 1),
                 BackgroundColor3 = Theme.Stroke,
                 ZIndex = 9
@@ -8012,7 +8065,7 @@ function YinYang:CreateWindow(title_text, startTheme)
             local displayTitle = titleSpanish and GetText(titleSpanish, titleEnglish)
             if displayTitle then
                 local Title = mk("TextLabel", {
-                    Parent = TabPage,
+                    Parent = contentParent,
                     Size = UDim2.new(1, 0, 0, 20),
                     BackgroundTransparency = 1,
                     Text = displayTitle,
@@ -8028,7 +8081,7 @@ function YinYang:CreateWindow(title_text, startTheme)
             end
 
             local GridHolder = mk("Frame", {
-                Parent = TabPage,
+                Parent = contentParent,
                 Size = UDim2.new(1, 0, 0, 0),
                 AutomaticSize = Enum.AutomaticSize.Y,
                 BackgroundTransparency = 1,
@@ -8155,7 +8208,7 @@ function YinYang:CreateWindow(title_text, startTheme)
             self._homeBuilt = true
 
             local HomeRoot = mk("Frame", {
-                Parent = TabPage,
+                Parent = contentParent,
                 Size = UDim2.new(1, 0, 0, 370),
                 BackgroundTransparency = 1,
                 BorderSizePixel = 0,
@@ -8504,7 +8557,7 @@ function YinYang:CreateWindow(title_text, startTheme)
                 return nil
             end
             local Card = mk("Frame", {
-                Parent = TabPage,
+                Parent = contentParent,
                 Size = UDim2.new(1, 0, 0, 0),
                 AutomaticSize = Enum.AutomaticSize.Y,
                 BackgroundTransparency = 1,
@@ -10756,7 +10809,7 @@ function YinYang:CreateWindow(title_text, startTheme)
 --// Reutiliza efectos existentes y solo crea instancias ausentes.
 --// ══════════════════════════════════════════════════════════════════════════════
 
-do
+    function Window:InitializeShaderSystem()
     local ShaderLightingService = game:GetService("Lighting")
     local ShaderTerrain = workspace:FindFirstChildOfClass("Terrain") or workspace.Terrain
     local ShaderCore = {}
@@ -13739,7 +13792,9 @@ do
     }
 
     --// La demo inicia activa, mientras la edición detallada queda dentro de Personalizado.
-end
+    end
+
+    Window:InitializeShaderSystem()
 
     --//  4TA PESTAÑA PERMANENTE: AJUSTES
     local ChatCornerMessagesEnabled = SavedConfig.ChatCornerMessages ~= false
@@ -14531,209 +14586,6 @@ end
         Window.ClearReplyTarget()
     end)
 
-    -- PANEL DE STICKERS
-    local StickerPanel = mk("Frame", {
-        Parent = ChatRoot,
-        Size = UDim2.new(1, -16, 0, 230),
-        Position = UDim2.new(0, 8, 1, -280),
-        BackgroundColor3 = Theme.Background,
-        BackgroundTransparency = 0.05,
-        BorderSizePixel = 0,
-        Visible = false,
-        ZIndex = 50,
-    })
-    StickerPanel:SetAttribute("ThemeRole", "Background")
-    corner(StickerPanel, 12)
-    stroke(StickerPanel, Theme.Stroke, 1, 0.5)
-
-    -- HEADER DEL PANEL
-    local PanelHeader = mk("Frame", {
-        Parent = StickerPanel,
-        Size = UDim2.new(1, 0, 0, 38),
-        BackgroundTransparency = 1,
-        BorderSizePixel = 0,
-        ZIndex = 51,
-    })
-
-    local TabStickers = mk("TextButton", {
-        Parent = PanelHeader,
-        Size = UDim2.new(0, 90, 0, 28),
-        Position = UDim2.new(0, 8, 0.5, -14),
-        BackgroundColor3 = Theme.Accent,
-        BackgroundTransparency = 0,
-        BorderSizePixel = 0,
-        Text = "Stickers",
-        TextColor3 = Theme.AccentText,
-        Font = Enum.Font.GothamBold,
-        TextSize = 12,
-        ZIndex = 52,
-    })
-    corner(TabStickers, 6)
-
-    local TabMisStickers = mk("TextButton", {
-        Parent = PanelHeader,
-        Size = UDim2.new(0, 100, 0, 28),
-        Position = UDim2.new(0, 106, 0.5, -14),
-        BackgroundColor3 = Theme.Secondary,
-        BackgroundTransparency = 0.4,
-        BorderSizePixel = 0,
-        Text = "Mis Stickers",
-        TextColor3 = Theme.Text,
-        Font = Enum.Font.GothamBold,
-        TextSize = 12,
-        ZIndex = 52,
-    })
-    corner(TabMisStickers, 6)
-
-    -- BOTÓN CERRAR CON ASSET X
-    local PanelClose = mk("ImageButton", {
-        Parent = PanelHeader,
-        Size = UDim2.new(0, 28, 0, 28),
-        Position = UDim2.new(1, -36, 0.5, -14),
-        BackgroundTransparency = 1,
-        BorderSizePixel = 0,
-        Image = "rbxassetid://132418587917225",
-        ImageColor3 = Theme.TextDim,
-        ScaleType = Enum.ScaleType.Fit,
-        ZIndex = 52,
-    })
-
-    -- GRID STICKERS DEFAULT
-    local StickerGrid = mk("ScrollingFrame", {
-        Parent = StickerPanel,
-        Size = UDim2.new(1, -16, 1, -46),
-        Position = UDim2.new(0, 8, 0, 42),
-        BackgroundTransparency = 1,
-        BorderSizePixel = 0,
-        ScrollBarThickness = 2,
-        CanvasSize = UDim2.new(0, 0, 0, 0),
-        ZIndex = 51,
-    })
-    mk("UIGridLayout", {
-        Parent = StickerGrid,
-        CellSize = UDim2.new(0, 68, 0, 68),
-        CellPadding = UDim2.new(0, 8, 0, 8),
-        SortOrder = Enum.SortOrder.LayoutOrder,
-        HorizontalAlignment = Enum.HorizontalAlignment.Left,
-    })
-    mk("UIPadding", {
-        Parent = StickerGrid,
-        PaddingTop = UDim.new(0, 4),
-        PaddingLeft = UDim.new(0, 4),
-    })
-
-    -- GRID MIS STICKERS
-    local MisStickerGrid = mk("ScrollingFrame", {
-        Parent = StickerPanel,
-        Size = UDim2.new(1, -16, 1, -46),
-        Position = UDim2.new(0, 8, 0, 42),
-        BackgroundTransparency = 1,
-        BorderSizePixel = 0,
-        ScrollBarThickness = 2,
-        CanvasSize = UDim2.new(0, 0, 0, 0),
-        Visible = false,
-        ZIndex = 51,
-    })
-    mk("UIGridLayout", {
-        Parent = MisStickerGrid,
-        CellSize = UDim2.new(0, 68, 0, 68),
-        CellPadding = UDim2.new(0, 8, 0, 8),
-        SortOrder = Enum.SortOrder.LayoutOrder,
-        HorizontalAlignment = Enum.HorizontalAlignment.Left,
-    })
-    mk("UIPadding", {
-        Parent = MisStickerGrid,
-        PaddingTop = UDim.new(0, 4),
-        PaddingLeft = UDim.new(0, 4),
-    })
-
-    -- BOTÓN "+" AGREGAR STICKER CUSTOM
-    local AddStickerBtn = mk("TextButton", {
-        Parent = MisStickerGrid,
-        Size = UDim2.new(0, 68, 0, 68),
-        BackgroundColor3 = Theme.Secondary,
-        BackgroundTransparency = 0.4,
-        BorderSizePixel = 0,
-        Text = "+",
-        TextColor3 = Theme.TextDim,
-        Font = Enum.Font.GothamBold,
-        TextSize = 28,
-        ZIndex = 53,
-        LayoutOrder = 999,
-    })
-    corner(AddStickerBtn, 8)
-    stroke(AddStickerBtn, Theme.Stroke, 1.5, 0.3)
-
-    -- INPUT PARA ID CUSTOM
-    local AddStickerInput = mk("TextBox", {
-        Parent = StickerPanel,
-        Size = UDim2.new(1, -80, 0, 30),
-        Position = UDim2.new(0, 8, 1, -38),
-        BackgroundColor3 = Theme.Secondary,
-        BackgroundTransparency = 0.3,
-        BorderSizePixel = 0,
-        Text = "",
-        PlaceholderText = "rbxassetid://...",
-        PlaceholderColor3 = Theme.TextDim,
-        TextColor3 = Theme.Text,
-        TextSize = 11,
-        Font = Enum.Font.Gotham,
-        ZIndex = 53,
-        Visible = false,
-    })
-    corner(AddStickerInput, 6)
-
-    local ConfirmAddBtn = mk("TextButton", {
-        Parent = StickerPanel,
-        Size = UDim2.new(0, 64, 0, 30),
-        Position = UDim2.new(1, -72, 1, -38),
-        BackgroundColor3 = Theme.Accent,
-        BorderSizePixel = 0,
-        Text = "Agregar",
-        TextColor3 = Theme.AccentText,
-        Font = Enum.Font.GothamBold,
-        TextSize = 11,
-        ZIndex = 53,
-        Visible = false,
-    })
-    corner(ConfirmAddBtn, 6)
-
-    -- STICKERS PERSONALIZADOS
-    local DefaultStickers = {
-        {id = "rbxassetid://135857695171095", name = "Sonrisa"},
-        {id = "rbxassetid://138363247925206", name = "Llorar"},
-        {id = "rbxassetid://76164124882568", name = "Amor"},
-        {id = "rbxassetid://76164124882568", name = "Corazón"},
-        {id = "rbxassetid://133861773375312", name = "Emoji"},
-        {id = "rbxassetid://109165098870367", name = "Risa"},
-        {id = "rbxassetid://89213081637073", name = "Sorpresa"},
-        {id = "rbxassetid://80817302481160", name = "Triste"},
-        {id = "rbxassetid://72815688632249", name = "Enojado"},
-        {id = "rbxassetid://72602706593283", name = "Wink"},
-        {id = "rbxassetid://129224642026377", name = "Cool"},
-    }
-
-    -- CARGAR STICKERS CUSTOM GUARDADOS
-    local CustomStickers = {}
-    if readfile and isfile then
-        pcall(function()
-            if isfile("YinYang_CustomStickers.json") then
-                local data = game:GetService("HttpService"):JSONDecode(readfile("YinYang_CustomStickers.json"))
-                if type(data) == "table" then
-                    CustomStickers = data
-                end
-            end
-        end)
-    end
-
-    local function SaveCustomStickers()
-        pcall(function()
-            if writefile then
-                writefile("YinYang_CustomStickers.json",
-                    game:GetService("HttpService"):JSONEncode(CustomStickers))
-            end
-        end)
-    end
 
     local function ScrollChatToBottom(force)
     	task.defer(function()
@@ -15786,6 +15638,212 @@ end
     SendButton.MouseButton1Click:Connect(SendMessage)
 
     --// ════════════════════════════════════════════════════════════════
+    --// CHAT: SISTEMA DE STICKERS (aislado para no consumir locales de CreateWindow)
+    --// ════════════════════════════════════════════════════════════════
+    function Window:InitializeChatStickers()
+    -- PANEL DE STICKERS
+    local StickerPanel = mk("Frame", {
+        Parent = ChatRoot,
+        Size = UDim2.new(1, -16, 0, 230),
+        Position = UDim2.new(0, 8, 1, -280),
+        BackgroundColor3 = Theme.Background,
+        BackgroundTransparency = 0.05,
+        BorderSizePixel = 0,
+        Visible = false,
+        ZIndex = 50,
+    })
+    StickerPanel:SetAttribute("ThemeRole", "Background")
+    corner(StickerPanel, 12)
+    stroke(StickerPanel, Theme.Stroke, 1, 0.5)
+
+    -- HEADER DEL PANEL
+    local PanelHeader = mk("Frame", {
+        Parent = StickerPanel,
+        Size = UDim2.new(1, 0, 0, 38),
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        ZIndex = 51,
+    })
+
+    local TabStickers = mk("TextButton", {
+        Parent = PanelHeader,
+        Size = UDim2.new(0, 90, 0, 28),
+        Position = UDim2.new(0, 8, 0.5, -14),
+        BackgroundColor3 = Theme.Accent,
+        BackgroundTransparency = 0,
+        BorderSizePixel = 0,
+        Text = "Stickers",
+        TextColor3 = Theme.AccentText,
+        Font = Enum.Font.GothamBold,
+        TextSize = 12,
+        ZIndex = 52,
+    })
+    corner(TabStickers, 6)
+
+    local TabMisStickers = mk("TextButton", {
+        Parent = PanelHeader,
+        Size = UDim2.new(0, 100, 0, 28),
+        Position = UDim2.new(0, 106, 0.5, -14),
+        BackgroundColor3 = Theme.Secondary,
+        BackgroundTransparency = 0.4,
+        BorderSizePixel = 0,
+        Text = "Mis Stickers",
+        TextColor3 = Theme.Text,
+        Font = Enum.Font.GothamBold,
+        TextSize = 12,
+        ZIndex = 52,
+    })
+    corner(TabMisStickers, 6)
+
+    -- BOTÓN CERRAR CON ASSET X
+    local PanelClose = mk("ImageButton", {
+        Parent = PanelHeader,
+        Size = UDim2.new(0, 28, 0, 28),
+        Position = UDim2.new(1, -36, 0.5, -14),
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        Image = "rbxassetid://132418587917225",
+        ImageColor3 = Theme.TextDim,
+        ScaleType = Enum.ScaleType.Fit,
+        ZIndex = 52,
+    })
+
+    -- GRID STICKERS DEFAULT
+    local StickerGrid = mk("ScrollingFrame", {
+        Parent = StickerPanel,
+        Size = UDim2.new(1, -16, 1, -46),
+        Position = UDim2.new(0, 8, 0, 42),
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        ScrollBarThickness = 2,
+        CanvasSize = UDim2.new(0, 0, 0, 0),
+        ZIndex = 51,
+    })
+    mk("UIGridLayout", {
+        Parent = StickerGrid,
+        CellSize = UDim2.new(0, 68, 0, 68),
+        CellPadding = UDim2.new(0, 8, 0, 8),
+        SortOrder = Enum.SortOrder.LayoutOrder,
+        HorizontalAlignment = Enum.HorizontalAlignment.Left,
+    })
+    mk("UIPadding", {
+        Parent = StickerGrid,
+        PaddingTop = UDim.new(0, 4),
+        PaddingLeft = UDim.new(0, 4),
+    })
+
+    -- GRID MIS STICKERS
+    local MisStickerGrid = mk("ScrollingFrame", {
+        Parent = StickerPanel,
+        Size = UDim2.new(1, -16, 1, -46),
+        Position = UDim2.new(0, 8, 0, 42),
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        ScrollBarThickness = 2,
+        CanvasSize = UDim2.new(0, 0, 0, 0),
+        Visible = false,
+        ZIndex = 51,
+    })
+    mk("UIGridLayout", {
+        Parent = MisStickerGrid,
+        CellSize = UDim2.new(0, 68, 0, 68),
+        CellPadding = UDim2.new(0, 8, 0, 8),
+        SortOrder = Enum.SortOrder.LayoutOrder,
+        HorizontalAlignment = Enum.HorizontalAlignment.Left,
+    })
+    mk("UIPadding", {
+        Parent = MisStickerGrid,
+        PaddingTop = UDim.new(0, 4),
+        PaddingLeft = UDim.new(0, 4),
+    })
+
+    -- BOTÓN "+" AGREGAR STICKER CUSTOM
+    local AddStickerBtn = mk("TextButton", {
+        Parent = MisStickerGrid,
+        Size = UDim2.new(0, 68, 0, 68),
+        BackgroundColor3 = Theme.Secondary,
+        BackgroundTransparency = 0.4,
+        BorderSizePixel = 0,
+        Text = "+",
+        TextColor3 = Theme.TextDim,
+        Font = Enum.Font.GothamBold,
+        TextSize = 28,
+        ZIndex = 53,
+        LayoutOrder = 999,
+    })
+    corner(AddStickerBtn, 8)
+    stroke(AddStickerBtn, Theme.Stroke, 1.5, 0.3)
+
+    -- INPUT PARA ID CUSTOM
+    local AddStickerInput = mk("TextBox", {
+        Parent = StickerPanel,
+        Size = UDim2.new(1, -80, 0, 30),
+        Position = UDim2.new(0, 8, 1, -38),
+        BackgroundColor3 = Theme.Secondary,
+        BackgroundTransparency = 0.3,
+        BorderSizePixel = 0,
+        Text = "",
+        PlaceholderText = "rbxassetid://...",
+        PlaceholderColor3 = Theme.TextDim,
+        TextColor3 = Theme.Text,
+        TextSize = 11,
+        Font = Enum.Font.Gotham,
+        ZIndex = 53,
+        Visible = false,
+    })
+    corner(AddStickerInput, 6)
+
+    local ConfirmAddBtn = mk("TextButton", {
+        Parent = StickerPanel,
+        Size = UDim2.new(0, 64, 0, 30),
+        Position = UDim2.new(1, -72, 1, -38),
+        BackgroundColor3 = Theme.Accent,
+        BorderSizePixel = 0,
+        Text = "Agregar",
+        TextColor3 = Theme.AccentText,
+        Font = Enum.Font.GothamBold,
+        TextSize = 11,
+        ZIndex = 53,
+        Visible = false,
+    })
+    corner(ConfirmAddBtn, 6)
+
+    -- STICKERS PERSONALIZADOS
+    local DefaultStickers = {
+        {id = "rbxassetid://135857695171095", name = "Sonrisa"},
+        {id = "rbxassetid://138363247925206", name = "Llorar"},
+        {id = "rbxassetid://76164124882568", name = "Amor"},
+        {id = "rbxassetid://76164124882568", name = "Corazón"},
+        {id = "rbxassetid://133861773375312", name = "Emoji"},
+        {id = "rbxassetid://109165098870367", name = "Risa"},
+        {id = "rbxassetid://89213081637073", name = "Sorpresa"},
+        {id = "rbxassetid://80817302481160", name = "Triste"},
+        {id = "rbxassetid://72815688632249", name = "Enojado"},
+        {id = "rbxassetid://72602706593283", name = "Wink"},
+        {id = "rbxassetid://129224642026377", name = "Cool"},
+    }
+
+    -- CARGAR STICKERS CUSTOM GUARDADOS
+    local CustomStickers = {}
+    if readfile and isfile then
+        pcall(function()
+            if isfile("YinYang_CustomStickers.json") then
+                local data = game:GetService("HttpService"):JSONDecode(readfile("YinYang_CustomStickers.json"))
+                if type(data) == "table" then
+                    CustomStickers = data
+                end
+            end
+        end)
+    end
+
+    local function SaveCustomStickers()
+        pcall(function()
+            if writefile then
+                writefile("YinYang_CustomStickers.json",
+                    game:GetService("HttpService"):JSONEncode(CustomStickers))
+            end
+        end)
+    end
     --// LÓGICA DE STICKERS (DESPUÉS de RenderMessage)
     --// ════════════════════════════════════════════════════════════════
 
@@ -15981,6 +16039,11 @@ end
             ShowStickerTab("stickers")
         end
     end)
+    end
+
+    Window:InitializeChatStickers()
+
+    --// ════════════════════════════════════════════════════════════════
 
     Window.InviteButton.MouseButton1Click:Connect(function()
         Window.SendServerInvite()
@@ -16095,6 +16158,10 @@ end
     end)
 
     --// ════════════════════════════════════════════════════════════════
+    --// ════════════════════════════════════════════════════════════════
+    --// TAB: CRÉDITOS (aislada para no consumir locales de CreateWindow)
+    --// ════════════════════════════════════════════════════════════════
+    function Window:CreateCreditsTab()
     --// TAB: CRÉDITOS (todo en una pantalla, sin scroll)
     --// ════════════════════════════════════════════════════════════════
     local TabCreditos = Window:CreateTab("Créditos", "Credits", "rbxassetid://72420970081590")
@@ -16423,6 +16490,10 @@ end
     CR_FooterText:SetAttribute("TextEnglish", "© 2026 Yin Yang | Script Hub  •  All rights reserved.")
 
     --// ════════════════════════════════════════════════════════════════
+    end
+
+    Window:CreateCreditsTab()
+
     --// TAB: LOGO
     --// ════════════════════════════════════════════════════════════════
     --// Aislada en su propia función por el mismo motivo que BuildTemasTab:
