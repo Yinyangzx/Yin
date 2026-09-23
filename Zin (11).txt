@@ -1430,46 +1430,29 @@ local CLASSIC_REPO_BASE = "https://raw.githubusercontent.com/Yinyangzx/yin-class
 local CLASSIC_MANIFEST_URL = "https://raw.githubusercontent.com/Yinyangzx/yin-classic/refs/heads/main/manifest_UPLOAD"
 
 local function LoadClassicManifest()
-    local fallback = {
-        { es = "Ocultar GUIs", en = "Hide GUIs", file = "YinYang_ClassicOptions.lua", key = "HideGuis" },
-        { es = "Ajustar FOV", en = "Adjust FOV", file = "YinYang_ClassicOptions.lua", key = "FOVAdjust" },
-        { es = "Waypoint", en = "Waypoint", file = "YinYang_ClassicOptions.lua", key = "Waypoint" },
-        { es = "Optimizar Rendimiento", en = "Performance Optimizer", file = "YinYang_ClassicOptions.lua", key = "PerformanceOptimizer" },
-        { es = "Estadísticas (FPS/Ping)", en = "Stats (FPS/Ping)", file = "YinYang_ClassicOptions.lua", key = "StatsHUD" },
-    }
-
     local dlOk, rawData = pcall(function()
         return game:HttpGet(CLASSIC_MANIFEST_URL, true)
     end)
     if not (dlOk and type(rawData) == "string" and #rawData > 10) then
-        print("[YinYang Classic] ⚠️ No se pudo descargar el manifest; usando el catálogo de respaldo")
-        return fallback
+        print("[YinYang Classic] ❌ No se pudo descargar el manifest; la pestaña quedará vacía")
+        return {}
     end
 
     local parseOk, data = pcall(function()
-        local chunk = loadstring(rawData)
-        if type(chunk) ~= "function" then
-            error("loadstring no devolvió una función")
-        end
-        return chunk()
+        return loadstring(rawData)()
     end)
     rawData = nil
     if not (parseOk and type(data) == "table") then
-        print("[YinYang Classic] ⚠️ Error al parsear el manifest; usando el catálogo de respaldo")
-        return fallback
+        print("[YinYang Classic] ❌ Error al parsear el manifest")
+        return {}
     end
 
     local count = 0
     for _, entry in ipairs(data) do
-        if type(entry) == "table" and entry.es and entry.en and entry.file and entry.key then
+        if type(entry) == "table" then
             count = count + 1
         end
     end
-    if count == 0 then
-        print("[YinYang Classic] ⚠️ Manifest vacío o inválido; usando el catálogo de respaldo")
-        return fallback
-    end
-
     print("[YinYang Classic] ✅ " .. count .. " scripts externos en el manifest")
     return data
 end
@@ -2888,13 +2871,13 @@ function YinYang:CreateWindow(title_text, startTheme)
     ):Play()
 
     local TitleLabel = mk("TextLabel", {
-        Size = UDim2.new(0, 145, 1, 0),
+        Size = UDim2.new(0, 120, 1, 0),
         Position = UDim2.new(0, 15, 0, 0),
         BackgroundTransparency = 1,
         Text = title_text or "ZERO UI",
         TextColor3 = Theme.Text,
         Font = Enum.Font.GothamBold,
-        TextSize = 18,
+        TextSize = 16,
         TextXAlignment = Enum.TextXAlignment.Left,
         ZIndex = 7
     }, TopBar)
@@ -2906,7 +2889,7 @@ function YinYang:CreateWindow(title_text, startTheme)
 
     local BoomboxPill = mk("Frame", {
         Size = UDim2.new(0, 155, 0, 28),
-        Position = UDim2.new(0.5, -77, 0.5, -17),
+        Position = UDim2.new(0.5, -77, 0.5, -14),
         BackgroundColor3 = Color3.fromRGB(5, 5, 8),
         BackgroundTransparency = 0,
         ZIndex = 10,
@@ -3042,7 +3025,7 @@ function YinYang:CreateWindow(title_text, startTheme)
             Parent = Main,
             AnchorPoint = Vector2.new(0.5, 0),
             Size = UDim2.new(0.72, 0, 0, 17),
-            Position = UDim2.new(0.5, 0, 0, 39),
+            Position = UDim2.new(0.5, 0, 0, 38),
             BackgroundTransparency = 1,
             Text = SUBTEXT_MESSAGES[1],
             TextColor3 = Color3.new(0, 0, 0),
@@ -4543,95 +4526,54 @@ function YinYang:CreateWindow(title_text, startTheme)
             VerticalAlignment = Enum.VerticalAlignment.Top,
         }, TabPage)
 
+        local function clampTabScroll()
+            task.defer(function()
+                if not TabPage.Parent then return end
+                local maxY = math.max(0, TabPage.AbsoluteCanvasSize.Y - TabPage.AbsoluteWindowSize.Y)
+                if TabPage.CanvasPosition.Y > maxY then
+                    TabPage.CanvasPosition = Vector2.new(TabPage.CanvasPosition.X, maxY)
+                end
+            end)
+        end
+        TabPage:GetPropertyChangedSignal("AbsoluteCanvasSize"):Connect(clampTabScroll)
+        TabPage:GetPropertyChangedSignal("AbsoluteWindowSize"):Connect(clampTabScroll)
+
         local Tab = {Button = TabButton, Page = TabPage, NameSpanish = nameSpanish, NameEnglish = nameEnglish, IconAsset = iconAsset}
 
-        --// CONTENEDOR DE CONTENIDO — permite a scripts externos construir el contenido
-        --// dentro de un Frame propio (por ejemplo, dos páginas PC/Mobile de un carrusel)
-        --// sin crear los controles y luego moverlos de Parent.
-        --// Por defecto se mantiene exactamente el comportamiento anterior: TabPage.
-        local contentParent = TabPage
+        --// Contenedor de contenido opcional. Por defecto todo sigue usando TabPage.
+        Tab._ContentParent = TabPage
 
-        function Tab:GetContentContainer()
-            return contentParent
-        end
-
-        function Tab:SetContentContainer(container)
-            if container == nil then
-                contentParent = TabPage
-                return self
-            end
-            if typeof(container) ~= "Instance" or not container:IsA("GuiObject") then
-                warn("[YinYang] SetContentContainer: se esperaba un GuiObject; se mantiene TabPage")
-                contentParent = TabPage
-                return self
-            end
-            contentParent = container
-            return self
-        end
-
-        function Tab:ResetContentContainer()
-            contentParent = TabPage
-            return self
-        end
-
-        function Tab:CreateContentContainer(name, parent)
-            parent = parent or TabPage
-            if typeof(parent) ~= "Instance" or not parent:IsA("GuiObject") then
-                parent = TabPage
-            end
-
-            local Container = mk("Frame", {
-                Name = tostring(name or "ContentContainer"),
+        function Tab:CreateContentContainer(name)
+            local container = mk("Frame", {
+                Name = name or "ContentContainer",
                 Size = UDim2.new(1, 0, 0, 0),
                 AutomaticSize = Enum.AutomaticSize.Y,
                 BackgroundTransparency = 1,
                 BorderSizePixel = 0,
-                ZIndex = 9,
-            }, parent)
-
+                ZIndex = 8,
+            }, TabPage)
             mk("UIListLayout", {
+                Parent = container,
                 Padding = UDim.new(0, 6),
                 SortOrder = Enum.SortOrder.LayoutOrder,
                 VerticalAlignment = Enum.VerticalAlignment.Top,
-            }, Container)
-
-            return Container
+            })
+            return container
         end
 
-        local function refreshTabScroll()
-            if not TabPage or not TabPage.Parent then return end
-
-            local layout = TabPage:FindFirstChildOfClass("UIListLayout")
-            if not layout then return end
-
-            local contentHeight = math.max(0, layout.AbsoluteContentSize.Y)
-            local viewportHeight = math.max(0, TabPage.AbsoluteSize.Y)
-            local maxY = math.max(0, contentHeight - viewportHeight)
-
-            if TabPage.CanvasPosition.Y > maxY then
-                TabPage.CanvasPosition = Vector2.new(0, maxY)
-            end
-
-            -- Fuerza una medida válida después de que un contenido interno
-            -- (por ejemplo UIGridLayout) termine de calcular su tamaño.
-            TabPage.CanvasSize = UDim2.new(0, 0, 0, contentHeight)
+        function Tab:SetContentContainer(container)
+            self._ContentParent = container or TabPage
+            return self._ContentParent
         end
 
-        local canvasCorrection = false
-        TabPage:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
-            if canvasCorrection then return end
-            if not TabPage.Parent then return end
+        function Tab:GetContentContainer()
+            return self._ContentParent or TabPage
+        end
 
-            local layout = TabPage:FindFirstChildOfClass("UIListLayout")
-            if not layout then return end
-
-            local maxY = math.max(0, layout.AbsoluteContentSize.Y - TabPage.AbsoluteSize.Y)
-            if TabPage.CanvasPosition.Y > maxY then
-                canvasCorrection = true
-                TabPage.CanvasPosition = Vector2.new(0, maxY)
-                canvasCorrection = false
-            end
-        end)
+        function Tab:ResetContentContainer()
+            self._ContentParent = TabPage
+            return TabPage
+        end
 
         local function Select()
             for _, t in pairs(Window.Tabs) do
@@ -4641,14 +4583,11 @@ function YinYang:CreateWindow(title_text, startTheme)
             end
             TabPage.Visible = true
             TabPage.CanvasPosition = Vector2.new(0, 0)
-
-            -- Dos defer permiten que los layouts anidados (UIGridLayout,
-            -- AutomaticSize, etc.) terminen de calcularse al mostrar una pestaña.
             task.defer(function()
-                refreshTabScroll()
-                task.defer(refreshTabScroll)
+                if TabPage and TabPage.Parent then
+                    TabPage.CanvasPosition = Vector2.new(0, 0)
+                end
             end)
-
             TabButton.TextColor3 = Theme.AccentText
             TabButton.BackgroundColor3 = Theme.Accent
             if Window._RefreshCompactNavigation then Window._RefreshCompactNavigation() end
@@ -5340,7 +5279,7 @@ function YinYang:CreateWindow(title_text, startTheme)
             --// Altura aumentada (64 -> 80) para dar lugar a la fila de botones
             --// Desprender/Candado, igual que en CreateFloatingToggle.
             local Holder = mk("Frame", {
-                Parent = contentParent,
+                Parent = TabPage,
                 Size = UDim2.new(1, 0, 0, 80),
                 BackgroundColor3 = Theme.Secondary,
                 BackgroundTransparency = 0.7,
@@ -5764,7 +5703,7 @@ function YinYang:CreateWindow(title_text, startTheme)
 
             --// ── CONTENEDOR PRINCIPAL ──────────────────────────────────────────────
             local Holder = mk("Frame", {
-                Parent = contentParent,
+                Parent = TabPage,
                 Size = UDim2.new(1, 0, 0, holderH),
                 BackgroundColor3 = Theme.Secondary,
                 BackgroundTransparency = 0.78,
@@ -6067,7 +6006,7 @@ function YinYang:CreateWindow(title_text, startTheme)
 
             --// ── CONTENEDOR PRINCIPAL (misma tarjeta que CreateToggle) ───────────────
             local Holder = mk("Frame", {
-                Parent = contentParent,
+                Parent = TabPage,
                 Size = UDim2.new(1, 0, 0, 64),
                 BackgroundColor3 = Theme.Secondary,
                 BackgroundTransparency = 0.78,
@@ -6525,7 +6464,7 @@ function YinYang:CreateWindow(title_text, startTheme)
 
             --// ── FILA EN PESTAÑA ──────────────────────────────────────────────────────
             local Holder = mk("Frame", {
-                Parent = contentParent,
+                Parent = TabPage,
                 Size   = UDim2.new(1, 0, 0, 64),
                 BackgroundColor3 = Theme.Secondary,
                 BackgroundTransparency = 0.78,
@@ -6937,7 +6876,7 @@ function YinYang:CreateWindow(title_text, startTheme)
             --// los sliders consecutivos pertenecen al mismo carrusel; cualquier
             --// opción/elemento intermedio inicia su propio carrusel en su posición.
             local Carousel = nil
-            local children = contentParent:GetChildren()
+            local children = TabPage:GetChildren()
             for i = #children, 1, -1 do
                 local child = children[i]
                 if child:IsA("GuiObject") then
@@ -6951,7 +6890,7 @@ function YinYang:CreateWindow(title_text, startTheme)
 
             if not Carousel then
                 local SliderSection = mk("Frame", {
-                    Parent = contentParent,
+                    Parent = TabPage,
                     Size = UDim2.new(1, 0, 0, 134),
                     BackgroundTransparency = 1,
                     BorderSizePixel = 0,
@@ -7542,6 +7481,7 @@ function YinYang:CreateWindow(title_text, startTheme)
 
         --// BOTÓN ESTÁNDAR CON EFECTO LIQUID 🌊 (v28 - PRIMERA LIBRERÍA DE EXPLOIT)
         function Tab:CreateButton(textSpanish, textEnglishOrCallback, callbackOrIcon, iconAsset)
+            local contentParent = self._ContentParent or TabPage
             --// COMPATIBILIDAD: si el 2do argumento es string, es modo bilingüe.
             --// Si es function (o nil), es la firma antigua: (text, callback, iconAsset)
             local textEnglish = textSpanish
@@ -7582,7 +7522,7 @@ function YinYang:CreateWindow(title_text, startTheme)
             Btn:SetAttribute("ThemeRole", "Secondary")
             corner(Btn, 6)
             stroke(BtnWrapper, Theme.Stroke, 1, 0.6)
-            resetScrollTop(TabPage)
+            if contentParent == TabPage then resetScrollTop(TabPage) end
 
             if iconAsset then
                 mk("ImageLabel", {
@@ -7747,13 +7687,13 @@ function YinYang:CreateWindow(title_text, startTheme)
 
             --// ── CARD PRINCIPAL ─────────────────────────────────────────────────
             local Holder = mk("Frame", {
-                Parent = contentParent,
+                Parent = TabPage,
                 Size = UDim2.new(1, 0, 0, 68),
                 BackgroundColor3 = Theme.Secondary,
                 BackgroundTransparency = 0.78,
                 ClipsDescendants = true,
                 ZIndex = 9
-            })
+            }, TabPage)
             Holder:SetAttribute("ThemeRole", "Secondary")
             corner(Holder, 12)
             local HolderStroke = stroke(Holder, Theme.Stroke, 1, 0.55)
@@ -8060,6 +8000,7 @@ function YinYang:CreateWindow(title_text, startTheme)
 
         --// LABEL
         function Tab:CreateLabel(textSpanish, textEnglishOrSize, fontSize)
+            local contentParent = self._ContentParent or TabPage
             --// COMPATIBILIDAD: Si textEnglishOrSize es un número, es fontSize (código antiguo)
             local textEnglish = textSpanish
             if type(textEnglishOrSize) == "number" then
@@ -8090,12 +8031,13 @@ function YinYang:CreateWindow(title_text, startTheme)
             Label:SetAttribute("ThemeTextRole", "Text")
             Label:SetAttribute("TextSpanish", textSpanish)
             Label:SetAttribute("TextEnglish", textEnglish)
-            resetScrollTop(TabPage)
+            if contentParent == TabPage then resetScrollTop(TabPage) end
             return Label
         end
 
         --// DIVISOR
         function Tab:CreateDivider()
+            local contentParent = self._ContentParent or TabPage
             if self._homeBuilt then
                 return nil
             end
@@ -8114,6 +8056,7 @@ function YinYang:CreateWindow(title_text, startTheme)
         --// callback(item, index) se dispara al tocar una card.
         --// selectable (default true) resalta la card tocada, igual que el grid de íconos.
         function Tab:CreateImageGrid(titleSpanish, titleEnglish, items, callback, selectable)
+            local contentParent = self._ContentParent or TabPage
             if selectable == nil then selectable = true end
             items = items or {}
 
@@ -8240,29 +8183,7 @@ function YinYang:CreateWindow(title_text, startTheme)
             end
 
             refreshSelection()
-            resetScrollTop(TabPage)
-
-            -- El UIGridLayout puede tener tamaño 0 mientras la pestaña o el
-            -- contenedor del carrusel están ocultos. Sincronizarlo también cuando
-            -- cambia su tamaño hace que el contenido móvil aparezca al instante
-            -- al volver a ser visible, sin depender de cambiar de pestaña.
-            local gridLayout = GridHolder:FindFirstChildOfClass("UIGridLayout")
-            if gridLayout then
-                local function syncGridHolderSize()
-                    if not GridHolder or not GridHolder.Parent then return end
-                    local gridHeight = math.max(0, gridLayout.AbsoluteContentSize.Y)
-                    GridHolder.Size = UDim2.new(1, 0, 0, gridHeight)
-                end
-
-                gridLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(syncGridHolderSize)
-                GridHolder:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
-                    task.defer(syncGridHolderSize)
-                end)
-
-                task.defer(function()
-                    task.defer(syncGridHolderSize)
-                end)
-            end
+            if contentParent == TabPage then resetScrollTop(TabPage) end
 
             return {
                 Holder = GridHolder,
@@ -8285,7 +8206,7 @@ function YinYang:CreateWindow(title_text, startTheme)
             self._homeBuilt = true
 
             local HomeRoot = mk("Frame", {
-                Parent = contentParent,
+                Parent = TabPage,
                 Size = UDim2.new(1, 0, 0, 370),
                 BackgroundTransparency = 1,
                 BorderSizePixel = 0,
@@ -8634,7 +8555,7 @@ function YinYang:CreateWindow(title_text, startTheme)
                 return nil
             end
             local Card = mk("Frame", {
-                Parent = contentParent,
+                Parent = TabPage,
                 Size = UDim2.new(1, 0, 0, 0),
                 AutomaticSize = Enum.AutomaticSize.Y,
                 BackgroundTransparency = 1,
