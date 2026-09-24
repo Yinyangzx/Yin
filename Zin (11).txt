@@ -16802,14 +16802,24 @@ function YinYang:CreateWindow(title_text, startTheme)
         end
 
         local cover = track.Cover or track.cover or track.CoverId or track.coverId or track.coverUrl or ""
+        -- Método 2 de portada: URL real (ej. GitHub) que se descarga y cachea como archivo propio,
+        -- igual que el audio. Si CoverURL está vacío, se sigue usando "cover" (rbxassetid) de arriba.
+        local coverDownloadUrl = track.CoverURL or track.coverURL or track.CoverUrl or ""
         local audioUrl = track.AudioURL or track.audioUrl or track.AudioUrl or track.audioURL or ""
+
+        local safeName = tostring(name):lower():gsub("[^%w]+", "_"):gsub("_+", "_"):gsub("^_", ""):gsub("_$", "")
+        if safeName == "" then
+            safeName = "track_" .. tostring(index)
+        end
+
         local cacheName = track.CacheName or track.cacheName or track.audioFile or track.AudioFile
         if not cacheName or trim(cacheName) == "" then
-            local safeName = tostring(name):lower():gsub("[^%w]+", "_"):gsub("_+", "_"):gsub("^_", ""):gsub("_$", "")
-            if safeName == "" then
-                safeName = "track_" .. tostring(index)
-            end
             cacheName = safeName .. ".mp3"
+        end
+
+        local coverCacheName = track.CoverCacheName or track.coverCacheName or ""
+        if trim(coverDownloadUrl) ~= "" and trim(coverCacheName) == "" then
+            coverCacheName = safeName .. "_cover.png"
         end
 
         local id = track.Id or track.id or track.ID or tostring(index)
@@ -16820,6 +16830,8 @@ function YinYang:CreateWindow(title_text, startTheme)
             Artist = tostring(artist),
             Duration = duration,
             Cover = tostring(cover),
+            CoverURL = tostring(coverDownloadUrl),
+            CoverCacheName = tostring(coverCacheName),
             AudioURL = tostring(audioUrl),
             CacheName = tostring(cacheName),
             Raw = track,
@@ -17682,6 +17694,7 @@ function YinYang:CreateWindow(title_text, startTheme)
     local renderSongRows
     local clearSongRows
     local createSongRow
+    local resolveTrackCoverImage
 
     local function refreshSpotifyCatalogMode()
         local favorites = SpotifyState.FavoritesView == true
@@ -17899,7 +17912,7 @@ function YinYang:CreateWindow(title_text, startTheme)
         end
 
         if rowData.Cover then
-            rowData.Cover.Image = track.Cover
+            rowData.Cover.Image = resolveTrackCoverImage(track)
         end
 
         if rowData.Title then
@@ -17969,14 +17982,15 @@ function YinYang:CreateWindow(title_text, startTheme)
             hash = (hash * 31 + string.byte(seed, i)) % 360
         end
         local fallbackColor = Color3.fromHSV(hash / 360, 0.52, 0.28)
-        local hasCover = trim(track.Cover or "") ~= ""
+        local resolvedCover = resolveTrackCoverImage(track)
+        local hasCover = trim(resolvedCover or "") ~= ""
 
-        NowPlayingBackdrop.Image = hasCover and track.Cover or ""
+        NowPlayingBackdrop.Image = hasCover and resolvedCover or ""
         NowPlayingBackdrop.ImageTransparency = hasCover and 0.55 or 1
         NowPlayingBackdrop.BackgroundColor3 = hasCover and Color3.fromRGB(8, 8, 10) or fallbackColor
         NowPlayingBackdrop.BackgroundTransparency = hasCover and 0.12 or 0.06
         NowPlayingShade.BackgroundTransparency = hasCover and 0.52 or 0.30
-        AlbumArt.Image = hasCover and track.Cover or ""
+        AlbumArt.Image = hasCover and resolvedCover or ""
         AlbumArt.BackgroundColor3 = hasCover and Theme.Background or fallbackColor
         AlbumFallback.Visible = not hasCover
 
@@ -18098,6 +18112,95 @@ function YinYang:CreateWindow(title_text, startTheme)
         end
 
         return true, customAsset
+    end
+
+    -- Método 2 de portada: descarga y cachea la imagen real (ej. GitHub) como archivo propio,
+    -- con el mismo patrón que ensureTrackCached usa para el audio (isfile / writefile / getcustomasset).
+    -- Se guarda como archivo suelto (sin carpeta), con prefijo "YinYang_Cover_" para no chocar
+    -- nunca con los nombres de caché de audio (CacheName).
+    local function ensureCoverCached(track)
+        if not track.CoverURL or track.CoverURL == "" then
+            return false, "no_cover_url"
+        end
+
+        local cacheName = track.CoverCacheName
+        if not cacheName or cacheName == "" then
+            return false, "no_cover_cache_name"
+        end
+
+        local coverPath = "YinYang_Cover_" .. cacheName
+        local coverExists = false
+
+        if isfile then
+            local okFile, resultFile = pcall(function()
+                return isfile(coverPath)
+            end)
+            coverExists = okFile and resultFile == true
+        end
+
+        if not coverExists then
+            if not writefile then
+                return false, "writefile_unavailable"
+            end
+
+            local okDownload, data = pcall(function()
+                return game:HttpGet(track.CoverURL, true)
+            end)
+
+            if not okDownload or type(data) ~= "string" or #data < 10 then
+                return false, "download_failed"
+            end
+
+            local okWrite = pcall(function()
+                writefile(coverPath, data)
+            end)
+
+            if not okWrite then
+                return false, "cache_write_failed"
+            end
+        end
+
+        local customAsset = coverPath
+        if getcustomasset then
+            local okAsset, resultAsset = pcall(function()
+                return getcustomasset(coverPath)
+            end)
+            if okAsset and type(resultAsset) == "string" then
+                customAsset = resultAsset
+            end
+        end
+
+        return true, customAsset
+    end
+
+    -- Caché en memoria: evita repetir isfile/getcustomasset en cada refresco de fila
+    -- (updateTrackRow se llama por cada fila visible en cada re-render, no solo una vez como el audio).
+    local CoverAssetResolvedCache = {}
+
+    -- Único punto de entrada para pintar la portada de un track: decide entre
+    -- método 1 (rbxassetid en track.Cover, comportamiento original sin cambios)
+    -- y método 2 (track.CoverURL descargada y cacheada). Si el método 2 falla,
+    -- cae de vuelta a track.Cover para no romper nada.
+    resolveTrackCoverImage = function(track)
+        if not track then
+            return ""
+        end
+
+        if track.CoverURL and track.CoverURL ~= "" then
+            local cacheKey = (track.CoverCacheName and track.CoverCacheName ~= "") and track.CoverCacheName or track.CoverURL
+            local cached = CoverAssetResolvedCache[cacheKey]
+            if cached then
+                return cached
+            end
+
+            local okCover, coverAssetOrErr = ensureCoverCached(track)
+            if okCover then
+                CoverAssetResolvedCache[cacheKey] = coverAssetOrErr
+                return coverAssetOrErr
+            end
+        end
+
+        return track.Cover or ""
     end
 
     local function playTrack(index)
@@ -18476,7 +18579,8 @@ function YinYang:CreateWindow(title_text, startTheme)
         FloatingPlayer.Visible = SpotifyState.FloatingPlayerVisible == true
         local currentTrack = SpotifyState.CurrentTrack or SpotifyState.Catalog[SpotifyState.SelectedIndex]
         if not currentTrack then return end
-        FloatCover.Image = currentTrack.Cover or ""; FloatFallback.Visible = trim(currentTrack.Cover or "") == ""
+        local floatResolvedCover = resolveTrackCoverImage(currentTrack)
+        FloatCover.Image = floatResolvedCover or ""; FloatFallback.Visible = trim(floatResolvedCover or "") == ""
         FloatTitle.Text = currentTrack.Name or "Selecciona una canción"; FloatArtist.Text = currentTrack.Artist or "Spotify"
         local current = SpotifyState.CurrentSound and math.max(0, tonumber(SpotifyState.CurrentSound.TimePosition) or 0) or 0
         local total = SpotifyState.CurrentSound and tonumber(SpotifyState.CurrentSound.TimeLength) or durationToSeconds(currentTrack.Duration)
@@ -18671,7 +18775,7 @@ function YinYang:CreateWindow(title_text, startTheme)
             BackgroundColor3 = Color3.fromRGB(18, 18, 18),
             BackgroundTransparency = 0.04,
             BorderSizePixel = 0,
-            Image = track.Cover,
+            Image = resolveTrackCoverImage(track),
             ScaleType = Enum.ScaleType.Crop,
             ZIndex = 12,
         })
