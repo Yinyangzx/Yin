@@ -16819,7 +16819,15 @@ function YinYang:CreateWindow(title_text, startTheme)
 
         local coverCacheName = track.CoverCacheName or track.coverCacheName or ""
         if trim(coverDownloadUrl) ~= "" and trim(coverCacheName) == "" then
-            coverCacheName = safeName .. "_cover.png"
+            -- BUGFIX: antes se guardaba siempre como "_cover.png" sin importar el archivo real,
+            -- lo que rompía la decodificación cuando la URL era .jpg/.jpeg/.webp (el executor
+            -- decide el formato de imagen por la extensión del nombre de archivo cacheado).
+            -- Ahora se toma la extensión real de la URL (ignorando ?query o #fragment);
+            -- si no se puede determinar una extensión razonable, se cae a .png.
+            local urlWithoutQuery = tostring(coverDownloadUrl):match("^[^%?#]+") or tostring(coverDownloadUrl)
+            local urlExt = urlWithoutQuery:match("%.([%w]+)$")
+            urlExt = (urlExt and urlExt ~= "" and #urlExt <= 5) and urlExt:lower() or "png"
+            coverCacheName = safeName .. "_cover." .. urlExt
         end
 
         local id = track.Id or track.id or track.ID or tostring(index)
