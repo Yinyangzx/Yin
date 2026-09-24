@@ -2883,6 +2883,127 @@ function YinYang:CreateWindow(title_text, startTheme)
     }, TopBar)
     TitleLabel:SetAttribute("ThemeTextRole", "Text")
 
+    --// ════════════════════════════════════════════════════════════════════════
+    --// BANNER SLIDESHOW — Imagen pequeña junto al nombre de la librería
+    --// ════════════════════════════════════════════════════════════════════════
+    --// Muestra imágenes que ciclan con crossfade en el TopBar, justo a la
+    --// derecha del nombre de la librería ("Yin Yang").
+    --//
+    --// ── CÓMO AGREGAR / QUITAR BANNERS ────────────────────────────────────
+    --// Editá la tabla BannerSlideshow_Images. Cada entrada tiene:
+    --//
+    --//   { name = "NombreUnico.png", url = "URL_directa_de_la_imagen" }
+    --//
+    --//   • name  → nombre del archivo local que se guarda en disco (caché).
+    --//             Debe ser único y sin espacios. Ejemplo: "YYBannerCat1.png"
+    --//   • url   → URL directa (raw) de la imagen.
+    --//             En GitHub usá raw.githubusercontent.com, NO github.com.
+    --//             Ejemplo correcto:
+    --//             "https://raw.githubusercontent.com/usuario/repo/main/img.png"
+    --//             Ejemplo incorrecto (no usar):
+    --//             "https://github.com/usuario/repo/blob/main/img.png"
+    --//
+    --// ── PARÁMETROS AJUSTABLES ─────────────────────────────────────────────
+    --//   BannerSlideshow_Interval  → segundos que cada imagen permanece visible
+    --//                               (default: 5)
+    --//   BannerSlideshow_FadeTime  → duración del crossfade en segundos
+    --//                               (default: 0.4)
+    --//
+    --// ── REQUISITOS DEL EXECUTOR ───────────────────────────────────────────
+    --// Requiere que el executor soporte estas funciones globales:
+    --//   game:HttpGet, writefile, isfile, getcustomasset
+    --// Si alguna falta, el slideshow se omite sin romper el resto de la UI.
+    --// ════════════════════════════════════════════════════════════════════════
+
+    local BannerSlideshow_Images = {
+        { name = "YYBannerCat1.png", url = "https://raw.githubusercontent.com/Yinyangzx/Yin-Imag/main/BackgroundEraser_20260924_191300955.png" },
+        { name = "YYBannerCat2.png", url = "https://raw.githubusercontent.com/Yinyangzx/Yin-Imag/main/BackgroundEraser_20260924_190941541.png" },
+    }
+    local BannerSlideshow_Interval = 5
+    local BannerSlideshow_FadeTime = 0.4
+
+    local BannerFrame = mk("Frame", {
+        Name            = "BannerSlideshow",
+        AnchorPoint     = Vector2.new(0, 0.5),
+        Position        = UDim2.new(0, 142, 0.5, 0),
+        Size            = UDim2.fromOffset(30, 30),
+        BackgroundTransparency = 1,
+        ZIndex          = 8,
+    }, TopBar)
+    corner(BannerFrame, 6)
+
+    local BannerImage = mk("ImageLabel", {
+        Size                   = UDim2.fromScale(1, 1),
+        BackgroundTransparency = 1,
+        Image                  = "",
+        ImageTransparency      = 1,
+        ScaleType              = Enum.ScaleType.Fit,
+        ZIndex                 = 8,
+    }, BannerFrame)
+    corner(BannerImage, 6)
+
+    task.spawn(function()
+        --// Verificar soporte del executor antes de intentar cualquier carga
+        if type(game.HttpGet) ~= "function"
+        or type(writefile) ~= "function"
+        or type(isfile) ~= "function"
+        or type(getcustomasset) ~= "function" then return end
+
+        --// Pre-cargar todas las imágenes en paralelo (descarga + caché en disco)
+        local assetCache = {}
+        for _, banner in ipairs(BannerSlideshow_Images) do
+            task.spawn(function()
+                pcall(function()
+                    --// Si el archivo ya existe en disco, saltar la descarga
+                    local cachedOk, cachedExists = pcall(isfile, banner.name)
+                    if not (cachedOk and cachedExists) then
+                        local dlOk, data = pcall(game.HttpGet, game, banner.url, true)
+                        if not dlOk or type(data) ~= "string" or #data < 10 then return end
+                        pcall(writefile, banner.name, data)
+                    end
+                    --// Convertir el archivo local en un asset Roblox-compatible
+                    local assetOk, assetId = pcall(getcustomasset, banner.name)
+                    if assetOk and type(assetId) == "string" then
+                        assetCache[banner.name] = assetId
+                    end
+                end)
+            end)
+        end
+
+        --// Esperar hasta que el primer banner esté listo (máximo 10 segundos)
+        local waited = 0
+        while waited < 10 and not assetCache[BannerSlideshow_Images[1].name] do
+            task.wait(0.25)
+            waited = waited + 0.25
+        end
+        if not assetCache[BannerSlideshow_Images[1].name] then return end
+
+        --// Ciclo principal: muestra cada imagen con fade in → espera → fade out
+        local idx = 1
+        while BannerFrame and BannerFrame.Parent do
+            local banner  = BannerSlideshow_Images[idx]
+            local assetId = assetCache[banner.name]
+
+            if assetId then
+                BannerImage.Image = assetId
+                TweenService:Create(BannerImage,
+                    TweenInfo.new(BannerSlideshow_FadeTime, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
+                    { ImageTransparency = 0 }
+                ):Play()
+                task.wait(BannerSlideshow_Interval)
+                local fadeOut = TweenService:Create(BannerImage,
+                    TweenInfo.new(BannerSlideshow_FadeTime, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
+                    { ImageTransparency = 1 }
+                )
+                fadeOut:Play()
+                fadeOut.Completed:Wait()
+            else
+                task.wait(0.5)
+            end
+
+            idx = (idx % #BannerSlideshow_Images) + 1
+        end
+    end)
 
     --// BOOMBOX: Píldora en el centro del TopBar
     local BoomboxSound = nil
