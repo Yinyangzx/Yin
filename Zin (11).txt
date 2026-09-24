@@ -18156,6 +18156,7 @@ function YinYang:CreateWindow(title_text, startTheme)
             end)
 
             if not okDownload or type(data) ~= "string" or #data < 10 then
+                warn("[YinYang Spotify] Falló la descarga de portada (" .. tostring(track.CoverURL) .. "): " .. tostring(data))
                 return false, "download_failed"
             end
 
@@ -18164,21 +18165,26 @@ function YinYang:CreateWindow(title_text, startTheme)
             end)
 
             if not okWrite then
+                warn("[YinYang Spotify] Falló writefile para la portada: " .. coverPath)
                 return false, "cache_write_failed"
             end
         end
 
-        local customAsset = coverPath
-        if getcustomasset then
-            local okAsset, resultAsset = pcall(function()
-                return getcustomasset(coverPath)
-            end)
-            if okAsset and type(resultAsset) == "string" then
-                customAsset = resultAsset
-            end
+        if not getcustomasset then
+            warn("[YinYang Spotify] getcustomasset no está disponible en este ejecutor; no se puede mostrar la portada: " .. coverPath)
+            return false, "getcustomasset_unavailable"
         end
 
-        return true, customAsset
+        local okAsset, resultAsset = pcall(function()
+            return getcustomasset(coverPath)
+        end)
+
+        if not (okAsset and type(resultAsset) == "string") then
+            warn("[YinYang Spotify] getcustomasset falló para la portada (" .. coverPath .. "): " .. tostring(resultAsset))
+            return false, "getcustomasset_failed"
+        end
+
+        return true, resultAsset
     end
 
     -- Caché en memoria: evita repetir isfile/getcustomasset en cada refresco de fila
