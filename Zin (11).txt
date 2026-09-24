@@ -2917,7 +2917,7 @@ function YinYang:CreateWindow(title_text, startTheme)
         { name = "YYBannerCat1.png", url = "https://raw.githubusercontent.com/Yinyangzx/Yin-Imag/main/BackgroundEraser_20260924_191300955.png" },
         { name = "YYBannerCat2.png", url = "https://raw.githubusercontent.com/Yinyangzx/Yin-Imag/main/BackgroundEraser_20260924_190941541.png" },
     }
-    local BannerSlideshow_Interval = 2
+    local BannerSlideshow_Interval = 1.5
 
     local BannerFrame = mk("Frame", {
         Name            = "BannerSlideshow",
@@ -2929,15 +2929,27 @@ function YinYang:CreateWindow(title_text, startTheme)
     }, TopBar)
     corner(BannerFrame, 6)
 
-    local BannerImage = mk("ImageLabel", {
+    --// Double buffer: dos labels superpuestos. Mientras uno se muestra,
+    --// el otro carga la siguiente imagen en silencio → cambio sin parpadeo.
+    local BannerImageA = mk("ImageLabel", {
         Size                   = UDim2.fromScale(1, 1),
         BackgroundTransparency = 1,
         Image                  = "",
-        ImageTransparency      = 0,
         ScaleType              = Enum.ScaleType.Fit,
+        Visible                = false,
+        ZIndex                 = 9,
+    }, BannerFrame)
+    corner(BannerImageA, 6)
+
+    local BannerImageB = mk("ImageLabel", {
+        Size                   = UDim2.fromScale(1, 1),
+        BackgroundTransparency = 1,
+        Image                  = "",
+        ScaleType              = Enum.ScaleType.Fit,
+        Visible                = false,
         ZIndex                 = 8,
     }, BannerFrame)
-    corner(BannerImage, 6)
+    corner(BannerImageB, 6)
 
     task.spawn(function()
         --// Verificar soporte del executor antes de intentar cualquier carga
@@ -2975,20 +2987,35 @@ function YinYang:CreateWindow(title_text, startTheme)
         end
         if not assetCache[BannerSlideshow_Images[1].name] then return end
 
-        --// Ciclo principal: cambio instantáneo, sin tweens ni efectos
+        --// Double buffer: pre-cargar las dos primeras imágenes antes de mostrar
+        local function getAsset(i)
+            local b = BannerSlideshow_Images[((i - 1) % #BannerSlideshow_Images) + 1]
+            return assetCache[b.name] or ""
+        end
+
+        BannerImageA.Image = getAsset(1)
+        BannerImageB.Image = getAsset(2)
+        task.wait(0.05)  --// pausa mínima para que Roblox registre ambas texturas
+
+        local front = BannerImageA   --// el label que se ve ahora
+        local back  = BannerImageB   --// el label que carga la siguiente en silencio
+        front.Visible = true
+        back.Visible  = false
+
+        --// Ciclo: el back ya tiene la siguiente imagen lista → swap instantáneo
         local idx = 1
         while BannerFrame and BannerFrame.Parent do
-            local banner  = BannerSlideshow_Images[idx]
-            local assetId = assetCache[banner.name]
+            task.wait(BannerSlideshow_Interval)
 
-            if assetId then
-                BannerImage.Image = assetId
-                task.wait(BannerSlideshow_Interval)
-            else
-                task.wait(0.5)
-            end
+            --// Mostrar el back (ya cargado) y ocultar el front
+            back.Visible  = true
+            front.Visible = false
+            front, back = back, front  --// intercambiar roles
 
+            --// Avanzar índice y pre-cargar la próxima imagen en el back
             idx = (idx % #BannerSlideshow_Images) + 1
+            local nextIdx = (idx % #BannerSlideshow_Images) + 1
+            back.Image = getAsset(nextIdx)
         end
     end)
 
