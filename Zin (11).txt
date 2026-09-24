@@ -1001,7 +1001,7 @@ local ThemePalettes = {
 --// IMÁGENES DE FONDO POR TEMA (decorativas, se muestran detrás del contenido)
 local ThemeBackgroundImages = {
     J1 = "",
-    Dark = "rbxassetid://138004303203419",
+    Dark = "rbxassetid://76341519079058",
     DarkV2 = "rbxassetid://105596249630448",
     Pink = "rbxassetid://129299161197887",
     PinkV2 = "rbxassetid://140206818990660",
