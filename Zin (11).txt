@@ -2886,8 +2886,8 @@ function YinYang:CreateWindow(title_text, startTheme)
     --// ════════════════════════════════════════════════════════════════════════
     --// BANNER SLIDESHOW — Imagen pequeña junto al nombre de la librería
     --// ════════════════════════════════════════════════════════════════════════
-    --// Muestra imágenes que ciclan con crossfade en el TopBar, justo a la
-    --// derecha del nombre de la librería ("Yin Yang").
+    --// Muestra imágenes que ciclan instantáneamente en el TopBar, justo a la
+    --// derecha del nombre de la librería ("Yin Yang"). Sin tweens ni fade.
     --//
     --// ── CÓMO AGREGAR / QUITAR BANNERS ────────────────────────────────────
     --// Editá la tabla BannerSlideshow_Images. Cada entrada tiene:
@@ -2905,9 +2905,7 @@ function YinYang:CreateWindow(title_text, startTheme)
     --//
     --// ── PARÁMETROS AJUSTABLES ─────────────────────────────────────────────
     --//   BannerSlideshow_Interval  → segundos que cada imagen permanece visible
-    --//                               (default: 5)
-    --//   BannerSlideshow_FadeTime  → duración del crossfade en segundos
-    --//                               (default: 0.4)
+    --//                               (default: 2)
     --//
     --// ── REQUISITOS DEL EXECUTOR ───────────────────────────────────────────
     --// Requiere que el executor soporte estas funciones globales:
@@ -2919,13 +2917,12 @@ function YinYang:CreateWindow(title_text, startTheme)
         { name = "YYBannerCat1.png", url = "https://raw.githubusercontent.com/Yinyangzx/Yin-Imag/main/BackgroundEraser_20260924_191300955.png" },
         { name = "YYBannerCat2.png", url = "https://raw.githubusercontent.com/Yinyangzx/Yin-Imag/main/BackgroundEraser_20260924_190941541.png" },
     }
-    local BannerSlideshow_Interval = 5
-    local BannerSlideshow_FadeTime = 0.4
+    local BannerSlideshow_Interval = 2
 
     local BannerFrame = mk("Frame", {
         Name            = "BannerSlideshow",
         AnchorPoint     = Vector2.new(0, 0.5),
-        Position        = UDim2.new(0, 142, 0.5, 0),
+        Position        = UDim2.new(0, 98, 0.5, 0),
         Size            = UDim2.fromOffset(30, 30),
         BackgroundTransparency = 1,
         ZIndex          = 8,
@@ -2936,7 +2933,7 @@ function YinYang:CreateWindow(title_text, startTheme)
         Size                   = UDim2.fromScale(1, 1),
         BackgroundTransparency = 1,
         Image                  = "",
-        ImageTransparency      = 1,
+        ImageTransparency      = 0,
         ScaleType              = Enum.ScaleType.Fit,
         ZIndex                 = 8,
     }, BannerFrame)
@@ -2978,7 +2975,7 @@ function YinYang:CreateWindow(title_text, startTheme)
         end
         if not assetCache[BannerSlideshow_Images[1].name] then return end
 
-        --// Ciclo principal: muestra cada imagen con fade in → espera → fade out
+        --// Ciclo principal: cambio instantáneo, sin tweens ni efectos
         local idx = 1
         while BannerFrame and BannerFrame.Parent do
             local banner  = BannerSlideshow_Images[idx]
@@ -2986,17 +2983,7 @@ function YinYang:CreateWindow(title_text, startTheme)
 
             if assetId then
                 BannerImage.Image = assetId
-                TweenService:Create(BannerImage,
-                    TweenInfo.new(BannerSlideshow_FadeTime, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
-                    { ImageTransparency = 0 }
-                ):Play()
                 task.wait(BannerSlideshow_Interval)
-                local fadeOut = TweenService:Create(BannerImage,
-                    TweenInfo.new(BannerSlideshow_FadeTime, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
-                    { ImageTransparency = 1 }
-                )
-                fadeOut:Play()
-                fadeOut.Completed:Wait()
             else
                 task.wait(0.5)
             end
