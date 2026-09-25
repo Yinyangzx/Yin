@@ -21,11 +21,11 @@
 --// local TabRayo = Window:CreateTab("Energía", "rbxassetid://132646825035547")
 --// local TabAjustes = Window:CreateTab("Configuración", "rbxassetid://130729134186771")
 --//
---// LISTA DE ASSETS DISPONIBLES EN LA LIBRERÍA:
+--// LISTA DE ASSETS DISPONIBLES EN LA LIBRERÍA44:
 --// • Casa: 124987849953130
 --// • Manzana: 84419345138935
 --// • Rayo: 114693810646148
---// • Ajustes: 86797720103644
+--// • Ajustes: 867977201036
 --// • Candado: 115388161816720
 --// • Llave: 135318845352652
 --// • Lupa: 83456197177232
@@ -1567,36 +1567,35 @@ local function buildGlowOnStroke(frame, accentColor, cornerRadius)
     local existingStroke = frame:FindFirstChildOfClass("UIStroke")
     if not existingStroke then return end
 
-    -- Mantener el borde visible y coherente con el acento actual del tema.
-    -- Al cambiar de tema, swapThemeColor puede recolorear el stroke con el rol "Stroke";
-    -- aquí lo forzamos otra vez al color de acento para que el glow no se "pierda".
-    existingStroke.Color = accentColor
+    -- Borde base negro fuerte; la línea giratoria blanca se dibuja con el gradiente.
+    existingStroke.Color = Color3.fromRGB(15, 15, 15)
 
     -- Limpiar gradient anterior si existe
     local oldGrad = existingStroke:FindFirstChildOfClass("UIGradient")
     if oldGrad then oldGrad:Destroy() end
 
-    local h, s, v = Color3.toHSV(accentColor)
-    local accentLight = Color3.fromHSV(h, math.max(0, s - 0.3), math.min(1, v + 0.25))
-    local accentDark  = Color3.fromHSV(h, math.min(1, s + 0.1), math.max(0, v - 0.25))
+    local _bDark  = Color3.fromRGB(15, 15, 15)   --// negro fuerte para los bordes fijos
+    local _bWhite = Color3.fromRGB(255, 255, 255) --// blanco puro para la línea giratoria
 
     local grad = Instance.new("UIGradient")
     grad.Color = ColorSequence.new({
-        ColorSequenceKeypoint.new(0, accentDark),
-        ColorSequenceKeypoint.new(0.5, accentLight),
-        ColorSequenceKeypoint.new(1, accentDark),
+        ColorSequenceKeypoint.new(0,     _bDark),
+        ColorSequenceKeypoint.new(0.330, _bDark),
+        ColorSequenceKeypoint.new(0.335, _bWhite), --// línea blanca empieza
+        ColorSequenceKeypoint.new(0.665, _bWhite), --// línea blanca termina (más larga)
+        ColorSequenceKeypoint.new(0.670, _bDark),
+        ColorSequenceKeypoint.new(1,     _bDark),
     })
     grad.Transparency = NumberSequence.new({
-        NumberSequenceKeypoint.new(0, 0.4),
-        NumberSequenceKeypoint.new(0.5, 0),
-        NumberSequenceKeypoint.new(1, 0.4),
+        NumberSequenceKeypoint.new(0, 0),
+        NumberSequenceKeypoint.new(1, 0),
     })
     grad.Offset = Vector2.new(-1.5, 0)
     grad.Parent = existingStroke
 
     local sweepTween = TweenService:Create(
         grad,
-        TweenInfo.new(1.4, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, -1, false),
+        TweenInfo.new(3.5, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, -1, false),
         { Offset = Vector2.new(1.5, 0) }
     )
     sweepTween:Play()
@@ -1639,23 +1638,28 @@ local function buildAnimatedBorder(frame, accentColor, cornerRadius, forceStroke
         return
     end
 
+    local _bDark2  = Color3.fromRGB(15, 15, 15)
+    local _bWhite2 = Color3.fromRGB(255, 255, 255)
+
     local grad = Instance.new("UIGradient")
     grad.Color = ColorSequence.new({
-        ColorSequenceKeypoint.new(0, accentDark),
-        ColorSequenceKeypoint.new(0.5, accentLight),
-        ColorSequenceKeypoint.new(1, accentDark),
+        ColorSequenceKeypoint.new(0,     _bDark2),
+        ColorSequenceKeypoint.new(0.330, _bDark2),
+        ColorSequenceKeypoint.new(0.335, _bWhite2),
+        ColorSequenceKeypoint.new(0.665, _bWhite2),
+        ColorSequenceKeypoint.new(0.670, _bDark2),
+        ColorSequenceKeypoint.new(1,     _bDark2),
     })
     grad.Transparency = NumberSequence.new({
-        NumberSequenceKeypoint.new(0, 0.2),
-        NumberSequenceKeypoint.new(0.5, 0),
-        NumberSequenceKeypoint.new(1, 0.2),
+        NumberSequenceKeypoint.new(0, 0),
+        NumberSequenceKeypoint.new(1, 0),
     })
     grad.Offset = Vector2.new(-1.5, 0)
     grad.Parent = innerStroke
 
     local sweepTween = TweenService:Create(
         grad,
-        TweenInfo.new(1.4, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, -1, false),
+        TweenInfo.new(3.5, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, -1, false),
         { Offset = Vector2.new(1.5, 0) }
     )
     sweepTween:Play()
