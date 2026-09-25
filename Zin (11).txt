@@ -14041,7 +14041,7 @@ function YinYang:CreateWindow(title_text, startTheme)
     -- Railway expone este dominio por HTTPS público; el proceso interno escucha en el puerto 8080.
     -- No se agrega :8080 porque ese puerto no está expuesto públicamente en el dominio Railway.
     local BACKEND_URL = "https://chat-global-production-7619.up.railway.app"
-    local ChatSyncPollRate = 2  -- segundos entre cada consulta al backend
+    local ChatSyncPollRate = 60  -- segundos entre cada consulta al backend
     local knownServerIds = {}   -- IDs de mensajes de servidor ya renderizados
     local backendConnected = false
 
@@ -14098,9 +14098,12 @@ function YinYang:CreateWindow(title_text, startTheme)
     end
 
     --// Polling: pide mensajes nuevos cada ChatSyncPollRate segundos
-    --// Se conecta después de crear el ChatTab (usa RenderMessage y AddChatMessage)
+    --// Back-off exponencial: si hay fallos consecutivos, espera más antes de reintentar
+    --// (máximo 5 minutos de espera), se resetea al reconectar
     local function StartBackendPolling(onNewMessage)
         local initialSyncComplete = false
+        local consecutiveFails = 0
+        local MAX_BACKOFF = 300  -- 5 minutos máximo de espera entre reintentos
         task.spawn(function()
             while true do
                 local ok, response = pcall(function()
@@ -14113,6 +14116,7 @@ function YinYang:CreateWindow(title_text, startTheme)
                 if ok and response and response.Body then
                     local success, data = pcall(HttpService.JSONDecode, HttpService, response.Body)
                     if success and data and data.messages then
+                        consecutiveFails = 0  -- reset back-off al tener respuesta válida
                         if not backendConnected then
                             backendConnected = true
                             print("[ChatGlobal] Conectado al backend correctamente")
@@ -14151,8 +14155,12 @@ function YinYang:CreateWindow(title_text, startTheme)
                             end)
                             TopBarOnlineLabel.Text = tostring(count)
                         end
+                    else
+                        -- JSON inválido o sin campo messages: contar como fallo
+                        consecutiveFails = consecutiveFails + 1
                     end
                 else
+                    consecutiveFails = consecutiveFails + 1
                     if backendConnected then
                         warn("[ChatGlobal] Se perdió conexión con el backend")
                     end
@@ -14163,7 +14171,12 @@ function YinYang:CreateWindow(title_text, startTheme)
                     TopBarOnlineLabel.Text = "0"
                 end
 
-                task.wait(ChatSyncPollRate)
+                -- Back-off: 60s normal; si hay fallos, duplicar cada vez hasta MAX_BACKOFF
+                local waitTime = ChatSyncPollRate
+                if consecutiveFails > 0 then
+                    waitTime = math.min(ChatSyncPollRate * (2 ^ consecutiveFails), MAX_BACKOFF)
+                end
+                task.wait(waitTime)
             end
         end)
     end
