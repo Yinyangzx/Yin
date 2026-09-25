@@ -3343,6 +3343,29 @@ function YinYang:CreateWindow(title_text, startTheme)
         end
     end
 
+    --// hideUI: oculta la ventana sin destruir nada.
+    --// Shaders (Lighting/Terrain), Spotify, Boombox y todas las conexiones
+    --// siguen activos; el jugador los ve/escucha aunque la UI no esté visible.
+    --// Llamar hideUI() de nuevo o Window:Show() vuelve a mostrar la ventana.
+    local uiHidden = false
+    local function hideUI()
+        if uiHidden then
+            -- ya estaba oculta: volver a mostrar
+            uiHidden = false
+            uiVisible = true
+            Main.Visible = true
+            ShadowFrame.Visible = true
+            setRobloxCoreVisible(false)
+            return
+        end
+        uiHidden = true
+        uiVisible = false
+        Main.Visible = false
+        ShadowFrame.Visible = false
+        -- Restaurar la UI nativa de Roblox mientras la ventana esté oculta
+        setRobloxCoreVisible(true)
+    end
+
     local function shutdownUI()
         if closingUI then return end
         closingUI = true
@@ -3795,7 +3818,7 @@ function YinYang:CreateWindow(title_text, startTheme)
 
     CloseButton.MouseButton1Click:Connect(function()
         playSound(Sounds.Click, 0.6)
-        shutdownUI()
+        hideUI()
     end)
 
     --//  ANIMACIÓN YIN-YANG ÉPICA EN EL TÍTULO (v27)
@@ -9366,6 +9389,23 @@ function YinYang:CreateWindow(title_text, startTheme)
         end
     end
 
+    --// Window:Hide() — mismo efecto que el botón X: oculta la ventana
+    --// preservando shaders, Spotify, Boombox y todas las conexiones activas.
+    function Window:Hide()
+        if not uiHidden then
+            hideUI()
+        end
+    end
+
+    --// Window:Show() — vuelve a mostrar la ventana después de un Hide().
+    function Window:Show()
+        if uiHidden then
+            hideUI()  -- hideUI actúa como toggle
+        end
+    end
+
+    --// Window:Destroy() — cierre total: destruye la ScreenGui y desconecta todo.
+    --// Usar solo si realmente se quiere terminar el script por completo.
     function Window:Destroy()
         shutdownUI()
     end
@@ -14041,7 +14081,7 @@ function YinYang:CreateWindow(title_text, startTheme)
     -- Railway expone este dominio por HTTPS público; el proceso interno escucha en el puerto 8080.
     -- No se agrega :8080 porque ese puerto no está expuesto públicamente en el dominio Railway.
     local BACKEND_URL = "https://chat-global-production-7619.up.railway.app"
-    local ChatSyncPollRate = 60  -- segundos entre cada consulta al backend
+    local ChatSyncPollRate = 2  -- segundos entre cada consulta al backend
     local knownServerIds = {}   -- IDs de mensajes de servidor ya renderizados
     local backendConnected = false
 
@@ -14098,12 +14138,9 @@ function YinYang:CreateWindow(title_text, startTheme)
     end
 
     --// Polling: pide mensajes nuevos cada ChatSyncPollRate segundos
-    --// Back-off exponencial: si hay fallos consecutivos, espera más antes de reintentar
-    --// (máximo 5 minutos de espera), se resetea al reconectar
+    --// Se conecta después de crear el ChatTab (usa RenderMessage y AddChatMessage)
     local function StartBackendPolling(onNewMessage)
         local initialSyncComplete = false
-        local consecutiveFails = 0
-        local MAX_BACKOFF = 300  -- 5 minutos máximo de espera entre reintentos
         task.spawn(function()
             while true do
                 local ok, response = pcall(function()
@@ -14116,7 +14153,6 @@ function YinYang:CreateWindow(title_text, startTheme)
                 if ok and response and response.Body then
                     local success, data = pcall(HttpService.JSONDecode, HttpService, response.Body)
                     if success and data and data.messages then
-                        consecutiveFails = 0  -- reset back-off al tener respuesta válida
                         if not backendConnected then
                             backendConnected = true
                             print("[ChatGlobal] Conectado al backend correctamente")
@@ -14155,12 +14191,8 @@ function YinYang:CreateWindow(title_text, startTheme)
                             end)
                             TopBarOnlineLabel.Text = tostring(count)
                         end
-                    else
-                        -- JSON inválido o sin campo messages: contar como fallo
-                        consecutiveFails = consecutiveFails + 1
                     end
                 else
-                    consecutiveFails = consecutiveFails + 1
                     if backendConnected then
                         warn("[ChatGlobal] Se perdió conexión con el backend")
                     end
@@ -14171,12 +14203,7 @@ function YinYang:CreateWindow(title_text, startTheme)
                     TopBarOnlineLabel.Text = "0"
                 end
 
-                -- Back-off: 60s normal; si hay fallos, duplicar cada vez hasta MAX_BACKOFF
-                local waitTime = ChatSyncPollRate
-                if consecutiveFails > 0 then
-                    waitTime = math.min(ChatSyncPollRate * (2 ^ consecutiveFails), MAX_BACKOFF)
-                end
-                task.wait(waitTime)
+                task.wait(ChatSyncPollRate)
             end
         end)
     end
