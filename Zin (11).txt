@@ -1141,6 +1141,9 @@ LoadThemes()
 if ThemePalettes.Dark then
     ThemePalettes.Dark.Background = Color3.fromRGB(0, 0, 0)
 end
+--// Forzar imagen de fondo del tema Dark después de LoadThemes,
+--// para que el repo externo no la sobreescriba.
+ThemeBackgroundImages["Dark"] = "rbxassetid://76341519079058"
 
 --// ════════════════════════════════════════════════════════════════
 --// TEMAS PERSONALIZADOS DEL USUARIO (persistencia local)
