@@ -19554,13 +19554,15 @@ clearSongRows = function()
                 return
             end
 
-            PlaceStatsBackdrop = mk("Frame", {
+            PlaceStatsBackdrop = mk("TextButton", {
                 Parent               = Window.ScreenGui,
                 Size                 = UDim2.new(1, 0, 1, 0),
                 BackgroundColor3     = Color3.fromRGB(0, 0, 0),
                 BackgroundTransparency = 0.55,
                 BorderSizePixel      = 0,
                 Active               = true,
+                Text                 = "",
+                AutoButtonColor      = false,
                 ZIndex               = 500,
             })
             PlaceStatsWindow = mk("Frame", {
@@ -19735,13 +19737,15 @@ clearSongRows = function()
                 return
             end
 
-            ExportBackdrop = mk("Frame", {
+            ExportBackdrop = mk("TextButton", {
                 Parent               = Window.ScreenGui,
                 Size                 = UDim2.new(1, 0, 1, 0),
                 BackgroundColor3     = Color3.fromRGB(0, 0, 0),
                 BackgroundTransparency = 0.55,
                 BorderSizePixel      = 0,
                 Active               = true,
+                Text                 = "",
+                AutoButtonColor      = false,
                 ZIndex               = 500,
             })
             ExportWindow = mk("Frame", {
