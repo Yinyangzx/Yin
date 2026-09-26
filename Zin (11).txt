@@ -19561,22 +19561,33 @@ clearSongRows = function()
                 BackgroundTransparency = 0.55,
                 BorderSizePixel      = 0,
                 Active               = true,
-                Text                 = "",
                 AutoButtonColor      = false,
+                Text                 = "",
                 ZIndex               = 500,
             })
             PlaceStatsWindow = mk("Frame", {
-                Parent           = Window.ScreenGui,
-                Size             = UDim2.fromOffset(328, 220),
-                Position         = UDim2.fromScale(0.5, 0.5),
-                AnchorPoint      = Vector2.new(0.5, 0.5),
-                BackgroundColor3 = Theme.Background,
-                BorderSizePixel  = 0,
-                ZIndex           = 501,
+                Parent                    = Window.ScreenGui,
+                Size                      = UDim2.fromOffset(340, 238),
+                Position                  = UDim2.fromScale(0.5, 0.5),
+                AnchorPoint               = Vector2.new(0.5, 0.5),
+                BackgroundColor3          = Theme.Background,
+                BackgroundTransparency    = 0.12,
+                BorderSizePixel           = 0,
+                ZIndex                    = 501,
             })
             PlaceStatsWindow:SetAttribute("ThemeRole", "Background")
             corner(PlaceStatsWindow, 16)
             stroke(PlaceStatsWindow, Theme.Stroke, 1.5, 0.35)
+            local PAccent = mk("Frame", {
+                Parent               = PlaceStatsWindow,
+                Size                 = UDim2.new(1, -32, 0, 3),
+                Position             = UDim2.new(0, 16, 0, 0),
+                BackgroundColor3     = Theme.Accent,
+                BackgroundTransparency = 0.05,
+                BorderSizePixel      = 0,
+                ZIndex               = 502,
+            })
+            corner(PAccent, 2)
 
             --// Título
             local PTitle = mk("TextLabel", {
@@ -19597,14 +19608,20 @@ clearSongRows = function()
             local PClose = mk("TextButton", {
                 Parent               = PlaceStatsWindow,
                 Size                 = UDim2.fromOffset(28, 28),
-                Position             = UDim2.new(1, -38, 0, 8),
-                BackgroundTransparency = 1,
+                Position             = UDim2.new(1, -40, 0, 10),
+                BackgroundColor3     = Theme.Secondary,
+                BackgroundTransparency = 0.35,
+                BorderSizePixel      = 0,
                 Text                 = "✕",
                 TextColor3           = Theme.TextDim,
                 Font                 = Enum.Font.GothamBold,
-                TextSize             = 14,
+                TextSize             = 13,
+                AutoButtonColor      = false,
                 ZIndex               = 503,
             })
+            PClose:SetAttribute("ThemeRole", "Secondary")
+            corner(PClose, 9)
+            stroke(PClose, Theme.Stroke, 1, 0.5)
             PClose:SetAttribute("ThemeTextRole", "TextDim")
             local function closePlaceStats()
                 PlaceStatsWindow.Visible  = false
@@ -19617,7 +19634,7 @@ clearSongRows = function()
             local Instr = mk("TextLabel", {
                 Parent               = PlaceStatsWindow,
                 Size                 = UDim2.new(1, -32, 0, 18),
-                Position             = UDim2.new(0, 16, 0, 50),
+                Position             = UDim2.new(0, 16, 0, 54),
                 BackgroundTransparency = 1,
                 Text                 = "Pega el código de stats de otro usuario:",
                 TextColor3           = Theme.TextDim,
@@ -19631,10 +19648,10 @@ clearSongRows = function()
             --// TextBox
             local PInput = mk("TextBox", {
                 Parent               = PlaceStatsWindow,
-                Size                 = UDim2.new(1, -32, 0, 60),
-                Position             = UDim2.new(0, 16, 0, 74),
+                Size                 = UDim2.new(1, -32, 0, 70),
+                Position             = UDim2.new(0, 16, 0, 78),
                 BackgroundColor3     = Theme.Secondary,
-                BackgroundTransparency = 0.3,
+                BackgroundTransparency = 0.42,
                 BorderSizePixel      = 0,
                 Text                 = "",
                 PlaceholderText      = "Código copiado del Export Stats...",
@@ -19660,7 +19677,7 @@ clearSongRows = function()
             local PStatus = mk("TextLabel", {
                 Parent               = PlaceStatsWindow,
                 Size                 = UDim2.new(1, -148, 0, 28),
-                Position             = UDim2.new(0, 16, 1, -44),
+                Position             = UDim2.new(0, 16, 1, -48),
                 BackgroundTransparency = 1,
                 Text                 = "",
                 TextColor3           = Theme.Accent,
@@ -19675,8 +19692,8 @@ clearSongRows = function()
             --// Botón Started
             local StartBtn = mk("TextButton", {
                 Parent           = PlaceStatsWindow,
-                Size             = UDim2.fromOffset(110, 34),
-                Position         = UDim2.new(1, -126, 1, -46),
+                Size             = UDim2.fromOffset(110, 36),
+                Position         = UDim2.new(1, -126, 1, -50),
                 BackgroundColor3 = Theme.Accent,
                 Text             = "Started",
                 TextColor3       = Color3.fromRGB(0, 0, 0),
@@ -19744,22 +19761,33 @@ clearSongRows = function()
                 BackgroundTransparency = 0.55,
                 BorderSizePixel      = 0,
                 Active               = true,
-                Text                 = "",
                 AutoButtonColor      = false,
+                Text                 = "",
                 ZIndex               = 500,
             })
             ExportWindow = mk("Frame", {
-                Parent           = Window.ScreenGui,
-                Size             = UDim2.fromOffset(340, 420),
-                Position         = UDim2.fromScale(0.5, 0.5),
-                AnchorPoint      = Vector2.new(0.5, 0.5),
-                BackgroundColor3 = Theme.Background,
-                BorderSizePixel  = 0,
-                ZIndex           = 501,
+                Parent                    = Window.ScreenGui,
+                Size                      = UDim2.fromOffset(356, 438),
+                Position                  = UDim2.fromScale(0.5, 0.5),
+                AnchorPoint               = Vector2.new(0.5, 0.5),
+                BackgroundColor3          = Theme.Background,
+                BackgroundTransparency    = 0.12,
+                BorderSizePixel           = 0,
+                ZIndex                    = 501,
             })
             ExportWindow:SetAttribute("ThemeRole", "Background")
             corner(ExportWindow, 16)
             stroke(ExportWindow, Theme.Stroke, 1.5, 0.35)
+            local EAccent = mk("Frame", {
+                Parent               = ExportWindow,
+                Size                 = UDim2.new(1, -32, 0, 3),
+                Position             = UDim2.new(0, 16, 0, 0),
+                BackgroundColor3     = Theme.Accent,
+                BackgroundTransparency = 0.05,
+                BorderSizePixel      = 0,
+                ZIndex               = 502,
+            })
+            corner(EAccent, 2)
 
             --// Título
             local ETitle = mk("TextLabel", {
@@ -19780,14 +19808,20 @@ clearSongRows = function()
             local EClose = mk("TextButton", {
                 Parent               = ExportWindow,
                 Size                 = UDim2.fromOffset(28, 28),
-                Position             = UDim2.new(1, -38, 0, 8),
-                BackgroundTransparency = 1,
+                Position             = UDim2.new(1, -40, 0, 10),
+                BackgroundColor3     = Theme.Secondary,
+                BackgroundTransparency = 0.35,
+                BorderSizePixel      = 0,
                 Text                 = "✕",
                 TextColor3           = Theme.TextDim,
                 Font                 = Enum.Font.GothamBold,
-                TextSize             = 14,
+                TextSize             = 13,
+                AutoButtonColor      = false,
                 ZIndex               = 503,
             })
+            EClose:SetAttribute("ThemeRole", "Secondary")
+            corner(EClose, 9)
+            stroke(EClose, Theme.Stroke, 1, 0.5)
             EClose:SetAttribute("ThemeTextRole", "TextDim")
             local function closeExport()
                 ExportWindow.Visible   = false
@@ -19800,7 +19834,7 @@ clearSongRows = function()
             local ESub = mk("TextLabel", {
                 Parent               = ExportWindow,
                 Size                 = UDim2.new(1, -32, 0, 18),
-                Position             = UDim2.new(0, 16, 0, 48),
+                Position             = UDim2.new(0, 16, 0, 54),
                 BackgroundTransparency = 1,
                 Text                 = "Selecciona las pestañas a exportar:",
                 TextColor3           = Theme.TextDim,
@@ -19814,8 +19848,8 @@ clearSongRows = function()
             --// Scroll con lista de pestañas
             local ListScroll = mk("ScrollingFrame", {
                 Parent                  = ExportWindow,
-                Size                    = UDim2.new(1, -32, 1, -140),
-                Position                = UDim2.new(0, 16, 0, 72),
+                Size                    = UDim2.new(1, -32, 1, -146),
+                Position                = UDim2.new(0, 16, 0, 78),
                 BackgroundTransparency  = 1,
                 BorderSizePixel         = 0,
                 ScrollBarThickness      = 3,
@@ -19857,7 +19891,7 @@ clearSongRows = function()
                     Parent               = ListScroll,
                     Size                 = UDim2.new(1, 0, 0, 40),
                     BackgroundColor3     = Theme.Secondary,
-                    BackgroundTransparency = 0.55,
+                    BackgroundTransparency = 0.48,
                     BorderSizePixel      = 0,
                     LayoutOrder          = i,
                     ZIndex               = 503,
@@ -19920,7 +19954,7 @@ clearSongRows = function()
             local EStatus = mk("TextLabel", {
                 Parent               = ExportWindow,
                 Size                 = UDim2.new(1, -148, 0, 28),
-                Position             = UDim2.new(0, 16, 1, -50),
+                Position             = UDim2.new(0, 16, 1, -52),
                 BackgroundTransparency = 1,
                 Text                 = "",
                 TextColor3           = Theme.Accent,
