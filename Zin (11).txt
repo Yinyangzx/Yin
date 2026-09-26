@@ -7612,6 +7612,14 @@ function YinYang:CreateWindow(title_text, startTheme)
                     NameEnglish = text,
                     Holder = Holder,
                     Kind = "Slider",
+                    --// Stats: permite leer/escribir el valor actual desde el sistema de export/import
+                    GetValue = function() return value end,
+                    SetValue = function(v)
+                        local pct = math.clamp((v - min) / math.max(max - min, 0.0001), 0, 1)
+                        UpdateSlider(pct, true, false)
+                    end,
+                    Min = min,
+                    Max = max,
                 })
             end
 
@@ -13136,6 +13144,9 @@ function YinYang:CreateWindow(title_text, startTheme)
             set = function(value)
                 setValue(value, false)
             end,
+            apply = function(val)
+                setValue(val == true or val == 1, true)
+            end,
         }
     end
 
@@ -13320,6 +13331,9 @@ function YinYang:CreateWindow(title_text, startTheme)
             set = function(newValue)
                 setValue(newValue, false)
             end,
+            apply = function(newValue)
+                setValue(newValue, true)
+            end,
         }
     end
 
@@ -13395,6 +13409,51 @@ function YinYang:CreateWindow(title_text, startTheme)
             {id = "StormMode", es = "Relámpagos dinámicos", en = "Dynamic lightning", default = false, target = "Lighting", property = "GlobalShadows", toggle = true, getValue = function() return ShaderRain.StormEnabled end, onChange = function(value) ShaderRain:SetStormEnabled(value) end},
         }
     end
+
+    --// ── STATS: Hooks públicos para Export/Place Stats ──────────────────────────
+    --// Expuestos en Window para que CreateStatsTab (definido más abajo) pueda
+    --// leer los overrides actuales y aplicar valores aunque la ventana de
+    --// shaders aún no se haya abierto.
+    Window._ShaderSpecs = shaderCustomSpecs
+
+    Window._ShaderGetOverrides = function()
+        return ShaderCustomOverrides
+    end
+
+    Window._ShaderApply = function(id, val)
+        -- Si la ventana de shaders está abierta, usar su control (actualiza visual también)
+        local ctrl = ShaderCustomControls[id]
+        if ctrl and ctrl.apply then
+            pcall(ctrl.apply, val)
+            return
+        end
+        -- Fallback: aplicar directamente por spec (funciona sin abrir la ventana)
+        local specs = shaderCustomSpecs()
+        for _, spec in ipairs(specs) do
+            if spec.id == id then
+                if spec.toggle then
+                    local boolVal = (val == true or val == 1)
+                    ShaderCustomOverrides[id] = boolVal
+                    if type(spec.onChange) == "function" then
+                        pcall(spec.onChange, boolVal)
+                    else
+                        pcall(shaderApplySingle, spec.target, spec.property, boolVal)
+                    end
+                else
+                    local numVal = tonumber(val) or spec.default or 0
+                    ShaderCustomOverrides[id] = numVal
+                    if type(spec.onChange) == "function" then
+                        pcall(spec.onChange, numVal)
+                    else
+                        pcall(shaderApplySingle, spec.target, spec.property, numVal)
+                    end
+                end
+                shaderQueuePersistence()
+                return
+            end
+        end
+    end
+    --// ─────────────────────────────────────────────────────────────────────────
 
     local function shaderOpenCustomWindow()
         if ShaderCustomWindow and ShaderCustomWindow.Parent then
@@ -19329,6 +19388,624 @@ clearSongRows = function()
         PlayerMeta.Text = "Menú de opciones abierto"
     end)
     end
+
+    --// ════════════════════════════════════════════════════════════════
+    --// 📊 PESTAÑA STATS — Export / Place Stats
+    --// ════════════════════════════════════════════════════════════════
+    function Window:CreateStatsTab()
+        local StatsTab = Window:CreateTab("Stats", "Stats", "rbxassetid://123407637823707")
+        local StatsPage = StatsTab.Page
+
+        StatsPage.AutomaticCanvasSize  = Enum.AutomaticSize.Y
+        StatsPage.CanvasSize           = UDim2.new(0, 0, 0, 0)
+        StatsPage.ScrollBarThickness   = 2
+        StatsPage.ScrollingEnabled     = true
+        StatsPage.BackgroundTransparency = 1
+        StatsPage:SetAttribute("ThemeRole", "Background")
+
+        mk("UIListLayout", {
+            Parent      = StatsPage,
+            SortOrder   = Enum.SortOrder.LayoutOrder,
+            Padding     = UDim.new(0, 10),
+        })
+        mk("UIPadding", {
+            Parent       = StatsPage,
+            PaddingTop   = UDim.new(0, 10),
+            PaddingLeft  = UDim.new(0, 8),
+            PaddingRight = UDim.new(0, 8),
+            PaddingBottom= UDim.new(0, 10),
+        })
+
+        --// Header (icono + título + subtítulo)
+        local Header = mk("Frame", {
+            Parent               = StatsPage,
+            Size                 = UDim2.new(1, 0, 0, 62),
+            BackgroundTransparency = 1,
+            BorderSizePixel      = 0,
+            LayoutOrder          = 0,
+        })
+        mk("ImageLabel", {
+            Parent               = Header,
+            Size                 = UDim2.fromOffset(34, 34),
+            Position             = UDim2.new(0, 4, 0.5, -17),
+            BackgroundTransparency = 1,
+            Image                = "rbxassetid://88002112319084",
+            ScaleType            = Enum.ScaleType.Fit,
+            ZIndex               = 8,
+        })
+        local HTitle = mk("TextLabel", {
+            Parent               = Header,
+            Size                 = UDim2.new(1, -50, 0, 22),
+            Position             = UDim2.new(0, 48, 0, 10),
+            BackgroundTransparency = 1,
+            Text                 = "Estadísticas",
+            TextColor3           = Theme.Text,
+            Font                 = Enum.Font.GothamBold,
+            TextSize             = 16,
+            TextXAlignment       = Enum.TextXAlignment.Left,
+            ZIndex               = 8,
+        })
+        HTitle:SetAttribute("ThemeTextRole", "Text")
+        local HSub = mk("TextLabel", {
+            Parent               = Header,
+            Size                 = UDim2.new(1, -50, 0, 18),
+            Position             = UDim2.new(0, 48, 0, 34),
+            BackgroundTransparency = 1,
+            Text                 = "Selecciona una opción para continuar",
+            TextColor3           = Theme.TextDim,
+            Font                 = Enum.Font.Gotham,
+            TextSize             = 12,
+            TextXAlignment       = Enum.TextXAlignment.Left,
+            ZIndex               = 8,
+        })
+        HSub:SetAttribute("ThemeTextRole", "TextDim")
+
+        --// Helper: crea una tarjeta de opción (ícono · título · desc · flecha →)
+        local function makeOptionCard(icon, title, desc, layoutOrder, onClick)
+            local Card = mk("Frame", {
+                Parent               = StatsPage,
+                Size                 = UDim2.new(1, 0, 0, 74),
+                BackgroundColor3     = Theme.Secondary,
+                BackgroundTransparency = 0.5,
+                BorderSizePixel      = 0,
+                LayoutOrder          = layoutOrder,
+                ZIndex               = 8,
+            })
+            Card:SetAttribute("ThemeRole", "Secondary")
+            corner(Card, 14)
+            stroke(Card, Theme.Stroke, 1, 0.5)
+
+            mk("ImageLabel", {
+                Parent               = Card,
+                Size                 = UDim2.fromOffset(42, 42),
+                Position             = UDim2.new(0, 14, 0.5, -21),
+                BackgroundTransparency = 1,
+                Image                = icon,
+                ScaleType            = Enum.ScaleType.Fit,
+                ZIndex               = 9,
+            })
+            local TL = mk("TextLabel", {
+                Parent               = Card,
+                Size                 = UDim2.new(1, -104, 0, 22),
+                Position             = UDim2.new(0, 66, 0, 14),
+                BackgroundTransparency = 1,
+                Text                 = title,
+                TextColor3           = Theme.Text,
+                Font                 = Enum.Font.GothamBold,
+                TextSize             = 14,
+                TextXAlignment       = Enum.TextXAlignment.Left,
+                ZIndex               = 9,
+            })
+            TL:SetAttribute("ThemeTextRole", "Text")
+            local DL = mk("TextLabel", {
+                Parent               = Card,
+                Size                 = UDim2.new(1, -104, 0, 18),
+                Position             = UDim2.new(0, 66, 0, 38),
+                BackgroundTransparency = 1,
+                Text                 = desc,
+                TextColor3           = Theme.TextDim,
+                Font                 = Enum.Font.Gotham,
+                TextSize             = 11,
+                TextXAlignment       = Enum.TextXAlignment.Left,
+                ZIndex               = 9,
+            })
+            DL:SetAttribute("ThemeTextRole", "TextDim")
+            local ABtn = mk("TextButton", {
+                Parent           = Card,
+                Size             = UDim2.fromOffset(36, 36),
+                Position         = UDim2.new(1, -48, 0.5, -18),
+                BackgroundColor3 = Theme.Secondary,
+                Text             = "→",
+                TextColor3       = Theme.Text,
+                Font             = Enum.Font.GothamBold,
+                TextSize         = 18,
+                AutoButtonColor  = false,
+                ZIndex           = 10,
+            })
+            ABtn:SetAttribute("ThemeRole", "Secondary")
+            corner(ABtn, 10)
+            stroke(ABtn, Theme.Stroke, 1, 0.4)
+            --// Área clicable transparente sobre el resto de la tarjeta
+            local HitArea = mk("TextButton", {
+                Parent               = Card,
+                Size                 = UDim2.new(1, -50, 1, 0),
+                BackgroundTransparency = 1,
+                Text                 = "",
+                AutoButtonColor      = false,
+                ZIndex               = 10,
+            })
+            local function doClick()
+                playSound(Sounds.Click, 0.5)
+                onClick()
+            end
+            ABtn.MouseButton1Click:Connect(doClick)
+            HitArea.MouseButton1Click:Connect(doClick)
+            return Card
+        end
+
+        --// ── VENTANA: PLACE STATS ──────────────────────────────────────────
+        local PlaceStatsWindow  = nil
+        local PlaceStatsBackdrop = nil
+
+        local function openPlaceStats()
+            if PlaceStatsWindow and PlaceStatsWindow.Parent then
+                PlaceStatsWindow.Visible  = true
+                if PlaceStatsBackdrop then PlaceStatsBackdrop.Visible = true end
+                return
+            end
+
+            PlaceStatsBackdrop = mk("Frame", {
+                Parent               = Window.ScreenGui,
+                Size                 = UDim2.new(1, 0, 1, 0),
+                BackgroundColor3     = Color3.fromRGB(0, 0, 0),
+                BackgroundTransparency = 0.55,
+                BorderSizePixel      = 0,
+                Active               = true,
+                ZIndex               = 500,
+            })
+            PlaceStatsWindow = mk("Frame", {
+                Parent           = Window.ScreenGui,
+                Size             = UDim2.fromOffset(328, 220),
+                Position         = UDim2.fromScale(0.5, 0.5),
+                AnchorPoint      = Vector2.new(0.5, 0.5),
+                BackgroundColor3 = Theme.Background,
+                BorderSizePixel  = 0,
+                ZIndex           = 501,
+            })
+            PlaceStatsWindow:SetAttribute("ThemeRole", "Background")
+            corner(PlaceStatsWindow, 16)
+            stroke(PlaceStatsWindow, Theme.Stroke, 1.5, 0.35)
+
+            --// Título
+            local PTitle = mk("TextLabel", {
+                Parent               = PlaceStatsWindow,
+                Size                 = UDim2.new(1, -50, 0, 30),
+                Position             = UDim2.new(0, 16, 0, 12),
+                BackgroundTransparency = 1,
+                Text                 = "Place Stats",
+                TextColor3           = Theme.Text,
+                Font                 = Enum.Font.GothamBold,
+                TextSize             = 15,
+                TextXAlignment       = Enum.TextXAlignment.Left,
+                ZIndex               = 502,
+            })
+            PTitle:SetAttribute("ThemeTextRole", "Text")
+
+            --// Botón cerrar
+            local PClose = mk("TextButton", {
+                Parent               = PlaceStatsWindow,
+                Size                 = UDim2.fromOffset(28, 28),
+                Position             = UDim2.new(1, -38, 0, 8),
+                BackgroundTransparency = 1,
+                Text                 = "✕",
+                TextColor3           = Theme.TextDim,
+                Font                 = Enum.Font.GothamBold,
+                TextSize             = 14,
+                ZIndex               = 503,
+            })
+            PClose:SetAttribute("ThemeTextRole", "TextDim")
+            local function closePlaceStats()
+                PlaceStatsWindow.Visible  = false
+                PlaceStatsBackdrop.Visible = false
+            end
+            PClose.MouseButton1Click:Connect(closePlaceStats)
+            PlaceStatsBackdrop.MouseButton1Click:Connect(closePlaceStats)
+
+            --// Instrucción
+            local Instr = mk("TextLabel", {
+                Parent               = PlaceStatsWindow,
+                Size                 = UDim2.new(1, -32, 0, 18),
+                Position             = UDim2.new(0, 16, 0, 50),
+                BackgroundTransparency = 1,
+                Text                 = "Pega el código de stats de otro usuario:",
+                TextColor3           = Theme.TextDim,
+                Font                 = Enum.Font.Gotham,
+                TextSize             = 12,
+                TextXAlignment       = Enum.TextXAlignment.Left,
+                ZIndex               = 502,
+            })
+            Instr:SetAttribute("ThemeTextRole", "TextDim")
+
+            --// TextBox
+            local PInput = mk("TextBox", {
+                Parent               = PlaceStatsWindow,
+                Size                 = UDim2.new(1, -32, 0, 60),
+                Position             = UDim2.new(0, 16, 0, 74),
+                BackgroundColor3     = Theme.Secondary,
+                BackgroundTransparency = 0.3,
+                BorderSizePixel      = 0,
+                Text                 = "",
+                PlaceholderText      = "Código copiado del Export Stats...",
+                TextColor3           = Theme.Text,
+                PlaceholderColor3    = Theme.TextDim,
+                Font                 = Enum.Font.Gotham,
+                TextSize             = 11,
+                TextWrapped          = true,
+                ClearTextOnFocus     = false,
+                ZIndex               = 502,
+            })
+            PInput:SetAttribute("ThemeRole", "Secondary")
+            corner(PInput, 10)
+            stroke(PInput, Theme.Stroke, 1, 0.5)
+            mk("UIPadding", {
+                Parent       = PInput,
+                PaddingLeft  = UDim.new(0, 8),
+                PaddingRight = UDim.new(0, 8),
+                PaddingTop   = UDim.new(0, 6),
+            })
+
+            --// Status
+            local PStatus = mk("TextLabel", {
+                Parent               = PlaceStatsWindow,
+                Size                 = UDim2.new(1, -148, 0, 28),
+                Position             = UDim2.new(0, 16, 1, -44),
+                BackgroundTransparency = 1,
+                Text                 = "",
+                TextColor3           = Theme.Accent,
+                Font                 = Enum.Font.Gotham,
+                TextSize             = 11,
+                TextXAlignment       = Enum.TextXAlignment.Left,
+                TextWrapped          = true,
+                ZIndex               = 502,
+            })
+            PStatus:SetAttribute("ThemeTextRole", "Accent")
+
+            --// Botón Started
+            local StartBtn = mk("TextButton", {
+                Parent           = PlaceStatsWindow,
+                Size             = UDim2.fromOffset(110, 34),
+                Position         = UDim2.new(1, -126, 1, -46),
+                BackgroundColor3 = Theme.Accent,
+                Text             = "Started",
+                TextColor3       = Color3.fromRGB(0, 0, 0),
+                Font             = Enum.Font.GothamBold,
+                TextSize         = 13,
+                AutoButtonColor  = false,
+                ZIndex           = 503,
+            })
+            StartBtn:SetAttribute("ThemeRole", "Accent")
+            corner(StartBtn, 10)
+
+            StartBtn.MouseButton1Click:Connect(function()
+                local code = PInput.Text
+                if not code or code:match("^%s*$") then
+                    PStatus.Text = "❌ El campo está vacío"
+                    return
+                end
+                local ok, data = pcall(function()
+                    return HttpService:JSONDecode(code)
+                end)
+                if not ok or type(data) ~= "table" then
+                    PStatus.Text = "❌ Código inválido"
+                    return
+                end
+                local applied = 0
+                --// Aplicar sliders
+                if type(data.sliders) == "table" then
+                    for _, entry in ipairs(Window._GlobalOptionRegistry) do
+                        if entry.Kind == "Slider" and entry.SetValue then
+                            local v = data.sliders[entry.Id]
+                            if v ~= nil then
+                                pcall(entry.SetValue, tonumber(v))
+                                applied = applied + 1
+                            end
+                        end
+                    end
+                end
+                --// Aplicar shaders
+                if type(data.shaders) == "table" and Window._ShaderApply then
+                    for id, val in pairs(data.shaders) do
+                        pcall(Window._ShaderApply, id, val)
+                        applied = applied + 1
+                    end
+                end
+                playSound(Sounds.Click, 0.6)
+                PStatus.Text = "✅ " .. applied .. " ajuste(s) aplicados"
+            end)
+        end
+
+        --// ── VENTANA: EXPORT STATS ────────────────────────────────────────
+        local ExportWindow   = nil
+        local ExportBackdrop = nil
+
+        local function openExportStats()
+            if ExportWindow and ExportWindow.Parent then
+                ExportWindow.Visible   = true
+                if ExportBackdrop then ExportBackdrop.Visible = true end
+                return
+            end
+
+            ExportBackdrop = mk("Frame", {
+                Parent               = Window.ScreenGui,
+                Size                 = UDim2.new(1, 0, 1, 0),
+                BackgroundColor3     = Color3.fromRGB(0, 0, 0),
+                BackgroundTransparency = 0.55,
+                BorderSizePixel      = 0,
+                Active               = true,
+                ZIndex               = 500,
+            })
+            ExportWindow = mk("Frame", {
+                Parent           = Window.ScreenGui,
+                Size             = UDim2.fromOffset(340, 420),
+                Position         = UDim2.fromScale(0.5, 0.5),
+                AnchorPoint      = Vector2.new(0.5, 0.5),
+                BackgroundColor3 = Theme.Background,
+                BorderSizePixel  = 0,
+                ZIndex           = 501,
+            })
+            ExportWindow:SetAttribute("ThemeRole", "Background")
+            corner(ExportWindow, 16)
+            stroke(ExportWindow, Theme.Stroke, 1.5, 0.35)
+
+            --// Título
+            local ETitle = mk("TextLabel", {
+                Parent               = ExportWindow,
+                Size                 = UDim2.new(1, -50, 0, 30),
+                Position             = UDim2.new(0, 16, 0, 12),
+                BackgroundTransparency = 1,
+                Text                 = "Export Stats",
+                TextColor3           = Theme.Text,
+                Font                 = Enum.Font.GothamBold,
+                TextSize             = 15,
+                TextXAlignment       = Enum.TextXAlignment.Left,
+                ZIndex               = 502,
+            })
+            ETitle:SetAttribute("ThemeTextRole", "Text")
+
+            --// Botón cerrar
+            local EClose = mk("TextButton", {
+                Parent               = ExportWindow,
+                Size                 = UDim2.fromOffset(28, 28),
+                Position             = UDim2.new(1, -38, 0, 8),
+                BackgroundTransparency = 1,
+                Text                 = "✕",
+                TextColor3           = Theme.TextDim,
+                Font                 = Enum.Font.GothamBold,
+                TextSize             = 14,
+                ZIndex               = 503,
+            })
+            EClose:SetAttribute("ThemeTextRole", "TextDim")
+            local function closeExport()
+                ExportWindow.Visible   = false
+                ExportBackdrop.Visible = false
+            end
+            EClose.MouseButton1Click:Connect(closeExport)
+            ExportBackdrop.MouseButton1Click:Connect(closeExport)
+
+            --// Subtítulo
+            local ESub = mk("TextLabel", {
+                Parent               = ExportWindow,
+                Size                 = UDim2.new(1, -32, 0, 18),
+                Position             = UDim2.new(0, 16, 0, 48),
+                BackgroundTransparency = 1,
+                Text                 = "Selecciona las pestañas a exportar:",
+                TextColor3           = Theme.TextDim,
+                Font                 = Enum.Font.Gotham,
+                TextSize             = 12,
+                TextXAlignment       = Enum.TextXAlignment.Left,
+                ZIndex               = 502,
+            })
+            ESub:SetAttribute("ThemeTextRole", "TextDim")
+
+            --// Scroll con lista de pestañas
+            local ListScroll = mk("ScrollingFrame", {
+                Parent                  = ExportWindow,
+                Size                    = UDim2.new(1, -32, 1, -140),
+                Position                = UDim2.new(0, 16, 0, 72),
+                BackgroundTransparency  = 1,
+                BorderSizePixel         = 0,
+                ScrollBarThickness      = 3,
+                AutomaticCanvasSize     = Enum.AutomaticSize.Y,
+                CanvasSize              = UDim2.new(0, 0, 0, 0),
+                ZIndex                  = 502,
+            })
+            mk("UIListLayout", {
+                Parent    = ListScroll,
+                SortOrder = Enum.SortOrder.LayoutOrder,
+                Padding   = UDim.new(0, 6),
+            })
+
+            --// Recolectar pestañas únicas que tengan al menos 1 slider registrado
+            local tabNames = {}
+            local tabSet   = {}
+            for _, entry in ipairs(Window._GlobalOptionRegistry) do
+                if entry.Kind == "Slider" and entry.GetValue then
+                    local tName = entry.Id:match("^(.-)::") or entry.Id
+                    if not tabSet[tName] then
+                        tabSet[tName] = true
+                        table.insert(tabNames, tName)
+                    end
+                end
+            end
+            --// Shaders como pestaña especial
+            if Window._ShaderApply and not tabSet["Shaders"] then
+                table.insert(tabNames, "Shaders")
+            end
+
+            local checked = {}
+            for _, name in ipairs(tabNames) do
+                checked[name] = true  -- todo marcado por defecto
+            end
+
+            --// Crear filas con checkbox
+            for i, tabName in ipairs(tabNames) do
+                local Row = mk("Frame", {
+                    Parent               = ListScroll,
+                    Size                 = UDim2.new(1, 0, 0, 40),
+                    BackgroundColor3     = Theme.Secondary,
+                    BackgroundTransparency = 0.55,
+                    BorderSizePixel      = 0,
+                    LayoutOrder          = i,
+                    ZIndex               = 503,
+                })
+                Row:SetAttribute("ThemeRole", "Secondary")
+                corner(Row, 10)
+
+                local CheckBg = mk("Frame", {
+                    Parent           = Row,
+                    Size             = UDim2.fromOffset(20, 20),
+                    Position         = UDim2.new(0, 12, 0.5, -10),
+                    BackgroundColor3 = Theme.Accent,
+                    BorderSizePixel  = 0,
+                    ZIndex           = 504,
+                })
+                corner(CheckBg, 5)
+                local CheckMark = mk("TextLabel", {
+                    Parent               = CheckBg,
+                    Size                 = UDim2.new(1, 0, 1, 0),
+                    BackgroundTransparency = 1,
+                    Text                 = "✓",
+                    TextColor3           = Color3.fromRGB(0, 0, 0),
+                    Font                 = Enum.Font.GothamBold,
+                    TextSize             = 13,
+                    ZIndex               = 505,
+                })
+                CheckMark.Visible      = checked[tabName]
+                CheckBg.BackgroundColor3 = checked[tabName] and Theme.Accent or Theme.Secondary
+
+                local RL = mk("TextLabel", {
+                    Parent               = Row,
+                    Size                 = UDim2.new(1, -48, 1, 0),
+                    Position             = UDim2.new(0, 42, 0, 0),
+                    BackgroundTransparency = 1,
+                    Text                 = tabName,
+                    TextColor3           = Theme.Text,
+                    Font                 = Enum.Font.GothamBold,
+                    TextSize             = 13,
+                    TextXAlignment       = Enum.TextXAlignment.Left,
+                    ZIndex               = 504,
+                })
+                RL:SetAttribute("ThemeTextRole", "Text")
+
+                local RowBtn = mk("TextButton", {
+                    Parent               = Row,
+                    Size                 = UDim2.new(1, 0, 1, 0),
+                    BackgroundTransparency = 1,
+                    Text                 = "",
+                    AutoButtonColor      = false,
+                    ZIndex               = 506,
+                })
+                RowBtn.MouseButton1Click:Connect(function()
+                    checked[tabName]     = not checked[tabName]
+                    CheckMark.Visible    = checked[tabName]
+                    CheckBg.BackgroundColor3 = checked[tabName] and Theme.Accent or Theme.Secondary
+                end)
+            end
+
+            --// Status
+            local EStatus = mk("TextLabel", {
+                Parent               = ExportWindow,
+                Size                 = UDim2.new(1, -148, 0, 28),
+                Position             = UDim2.new(0, 16, 1, -50),
+                BackgroundTransparency = 1,
+                Text                 = "",
+                TextColor3           = Theme.Accent,
+                Font                 = Enum.Font.Gotham,
+                TextSize             = 11,
+                TextXAlignment       = Enum.TextXAlignment.Left,
+                TextWrapped          = true,
+                ZIndex               = 502,
+            })
+            EStatus:SetAttribute("ThemeTextRole", "Accent")
+
+            --// Botón Export
+            local ExportBtn = mk("TextButton", {
+                Parent           = ExportWindow,
+                Size             = UDim2.fromOffset(110, 36),
+                Position         = UDim2.new(1, -126, 1, -50),
+                BackgroundColor3 = Theme.Accent,
+                Text             = "Export",
+                TextColor3       = Color3.fromRGB(0, 0, 0),
+                Font             = Enum.Font.GothamBold,
+                TextSize         = 13,
+                AutoButtonColor  = false,
+                ZIndex           = 503,
+            })
+            ExportBtn:SetAttribute("ThemeRole", "Accent")
+            corner(ExportBtn, 10)
+
+            ExportBtn.MouseButton1Click:Connect(function()
+                local slidersData = {}
+                local shadersData = {}
+                local total       = 0
+
+                --// Recolectar sliders de pestañas marcadas
+                for _, entry in ipairs(Window._GlobalOptionRegistry) do
+                    if entry.Kind == "Slider" and entry.GetValue then
+                        local tName = entry.Id:match("^(.-)::") or entry.Id
+                        if checked[tName] then
+                            slidersData[entry.Id] = entry.GetValue()
+                            total = total + 1
+                        end
+                    end
+                end
+
+                --// Recolectar overrides de shaders si está marcado
+                if checked["Shaders"] and Window._ShaderGetOverrides then
+                    local overrides = Window._ShaderGetOverrides()
+                    for id, val in pairs(overrides) do
+                        shadersData[id] = val
+                        total = total + 1
+                    end
+                end
+
+                if total == 0 then
+                    EStatus.Text = "⚠️ No hay ajustes seleccionados"
+                    return
+                end
+
+                local payload = { version = 1, sliders = slidersData, shaders = shadersData }
+                local ok, encoded = pcall(function()
+                    return HttpService:JSONEncode(payload)
+                end)
+                if not ok then
+                    EStatus.Text = "❌ Error al codificar"
+                    return
+                end
+                pcall(function() setclipboard(encoded) end)
+                playSound(Sounds.Click, 0.7)
+                EStatus.Text = "✅ " .. total .. " ajuste(s) copiados al portapapeles"
+            end)
+        end
+
+        --// Crear las dos tarjetas en StatsPage
+        makeOptionCard(
+            "rbxassetid://98421914514000",
+            "Place Stats",
+            "Aplica los ajustes de otro usuario.",
+            1,
+            openPlaceStats
+        )
+        makeOptionCard(
+            "rbxassetid://116421707362805",
+            "Export Stats",
+            "Copia tus ajustes al portapapeles.",
+            2,
+            openExportStats
+        )
+    end
+    Window:CreateStatsTab()
+    --// ════════════════════════════════════════════════════════════════
 
     return Window
 
