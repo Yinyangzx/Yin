@@ -14354,7 +14354,7 @@ function YinYang:CreateWindow(title_text, startTheme)
         end
 
         local text = tostring(messageText or "")
-        if text == "" or text:match("^%[%[SERVERINVITE:") then
+        if text == "" or text:match("^%[%[SERVERINVITE:") or text:match("^%[%[ANUNCIO%]%]") then
             return
         end
 
@@ -14382,14 +14382,13 @@ function YinYang:CreateWindow(title_text, startTheme)
             Parent = ChatCornerContainer,
             Size = UDim2.new(1, 0, 0, stickerAsset and 46 or 31),
             BackgroundColor3 = Theme.Secondary,
-            BackgroundTransparency = 0.55,
+            BackgroundTransparency = 1,
             BorderSizePixel = 0,
             LayoutOrder = -ChatCornerSequence,
             ZIndex = 100,
         })
         Row:SetAttribute("ThemeRole", "Secondary")
         corner(Row, 7)
-        stroke(Row, Theme.Stroke, 1, 0.55)
 
         local Avatar = mk("ImageLabel", {
             Parent = Row,
@@ -14465,6 +14464,82 @@ function YinYang:CreateWindow(title_text, startTheme)
             end
         end)
     end
+
+    -- ════════════════════════════════════════════════════════════════
+    -- SISTEMA DE ANUNCIO DEL OWNER (Solo mousoza - ID 9549448191)
+    -- Comando: /Anuncio mensaje → banner top-center, user en rojo
+    -- ════════════════════════════════════════════════════════════════
+    local AnuncioQueue   = {}
+    local AnuncioRunning = false
+
+    local function ShowAnuncio(senderName, messageText)
+        table.insert(AnuncioQueue, { name = tostring(senderName or "?"), text = tostring(messageText or "") })
+
+        if AnuncioRunning then return end
+        AnuncioRunning = true
+
+        task.spawn(function()
+            while #AnuncioQueue > 0 do
+                local item = table.remove(AnuncioQueue, 1)
+
+                local AnuncioFrame = mk("Frame", {
+                    Parent               = ScreenGui,
+                    Size                 = UDim2.new(0, 420, 0, 36),
+                    Position             = UDim2.new(0.5, -210, 0, -44),
+                    BackgroundColor3     = Color3.fromRGB(16, 16, 16),
+                    BackgroundTransparency = 1,
+                    BorderSizePixel      = 0,
+                    ZIndex               = 9998,
+                })
+                corner(AnuncioFrame, 9)
+
+                -- Username en rojo + mensaje en blanco (RichText)
+                local richText = string.format(
+                    '<font color="rgb(255,65,65)"><b>%s</b></font>  <font color="rgb(228,228,228)"><b>%s</b></font>',
+                    item.name,
+                    item.text
+                )
+                mk("TextLabel", {
+                    Parent               = AnuncioFrame,
+                    Size                 = UDim2.new(1, -12, 1, 0),
+                    Position             = UDim2.new(0, 8, 0, 0),
+                    BackgroundTransparency = 1,
+                    Text                 = richText,
+                    RichText             = true,
+                    Font                 = Enum.Font.Gotham,
+                    TextSize             = 15,
+                    TextColor3           = Color3.fromRGB(228, 228, 228),
+                    TextXAlignment       = Enum.TextXAlignment.Center,
+                    TextYAlignment       = Enum.TextYAlignment.Center,
+                    TextTruncate         = Enum.TextTruncate.AtEnd,
+                    ZIndex               = 9999,
+                })
+
+                -- Slide-in desde arriba
+                TweenService:Create(
+                    AnuncioFrame,
+                    TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+                    { Position = UDim2.new(0.5, -210, 0, 22) }
+                ):Play()
+
+                task.wait(8)
+
+                -- Slide-out hacia arriba
+                local tweenOut = TweenService:Create(
+                    AnuncioFrame,
+                    TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
+                    { Position = UDim2.new(0.5, -210, 0, -44) }
+                )
+                tweenOut:Play()
+                tweenOut.Completed:Wait()
+                pcall(function() AnuncioFrame:Destroy() end)
+
+                task.wait(0.2) -- pausa entre anuncios en cola
+            end
+            AnuncioRunning = false
+        end)
+    end
+    -- ════════════════════════════════════════════════════════════════
 
     --// Mini-header dentro de ChatRoot
     local ChatHeader = mk("Frame", {
@@ -15735,6 +15810,24 @@ function YinYang:CreateWindow(title_text, startTheme)
     	local timestamp = os.date("%H:%M:%S")
 
     	-- ════════════════════════════════════════════════════════════════
+    	-- COMANDO /Anuncio mensaje (SOLO MOUZOSA - ID 9549448191)
+    	-- ════════════════════════════════════════════════════════════════
+    	do
+    		local MOUZOSA_ANUNCIO_ID = 9549448191
+    		local anuncioBody = messageText:match("^/[Aa]nuncios?%s+(.+)$")
+    		if anuncioBody and localPlayer.UserId == MOUZOSA_ANUNCIO_ID then
+    			anuncioBody = anuncioBody:match("^%s*(.-)%s*$") or ""
+    			if anuncioBody ~= "" then
+    				ShowAnuncio(localPlayer.Name, anuncioBody)
+    				BackendSendMessage(localPlayer.Name, localPlayer.UserId, "[[ANUNCIO]]" .. anuncioBody)
+    			end
+    			MessageInput.Text = ""
+    			return
+    		end
+    	end
+    	-- ════════════════════════════════════════════════════════════════
+
+    	-- ════════════════════════════════════════════════════════════════
     	-- COMANDO /username mensaje (SOLO MOUZOSA - ID 9549448191)
     	-- ════════════════════════════════════════════════════════════════
     	local MOUZOSA_ID = 9549448191
@@ -16267,6 +16360,14 @@ function YinYang:CreateWindow(title_text, startTheme)
     --// Iniciar sincronización en tiempo real con el backend
     --// Cada mensaje nuevo de OTRO jugador se agrega y renderiza automáticamente
     StartBackendPolling(function(msg, isInitialSync)
+        -- Detectar mensaje de anuncio del owner: [[ANUNCIO]]texto
+        local anuncioContent = tostring(msg.message or ""):match("^%[%[ANUNCIO%]%](.+)$")
+        if anuncioContent then
+            if not isInitialSync then
+                ShowAnuncio(msg.playerName, anuncioContent)
+            end
+            return -- no renderizar como mensaje de chat normal
+        end
         AddChatMessage(msg.playerName, msg.playerId, msg.message, os.date("%H:%M:%S", msg.timestamp))
         RenderMessage(msg.playerName, msg.playerId, msg.message, os.date("%H:%M:%S", msg.timestamp), false, msg.id, msg.lang)
         if not isInitialSync then
