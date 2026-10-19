@@ -883,12 +883,13 @@ function ESP.outline(e, char, color, on)
         local hl = Instance.new("Highlight")
         hl.Name = "HydraHL"
         hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-        hl.FillTransparency = 0.82
-        hl.OutlineTransparency = 0.05
+        hl.FillTransparency = 0.5
+        hl.OutlineTransparency = 0
         hl.Adornee = char
         hl.Parent = char
         e.hl = hl
     end
+    e.hl.Adornee = char
     e.hl.FillColor = color
     e.hl.OutlineColor = color
     e.hl.Enabled = true
@@ -991,7 +992,7 @@ RunService.RenderStepped:Connect(function()
 end)
 
 -- ---------- Auto Farm de tickets ----------
-local Farm = {Enabled = false, Speed = 150, Instant = false, Return = true, Busy = false}
+local Farm = {Enabled = false, Return = true, Busy = false}
 function Farm.tickets()
     local effects = workspace:FindFirstChild("Effects")
     local folder = effects and effects:FindFirstChild("Tickets")
@@ -1009,23 +1010,9 @@ function Farm.canMove()
     local me = More.data(LocalPlayer)
     return hum and hum.Health > 0 and not (me and More.reg(me, "Downed"))
 end
--- viaja hasta la posicion (deslizandose a la velocidad elegida, o directo)
+-- se teletransporta directo a la posicion
 function Farm.travel(root, target)
-    if Farm.Instant then
-        root.CFrame = CFrame.new(target)
-        root.AssemblyLinearVelocity = Vector3.zero
-        return true
-    end
-    local start = root.Position
-    local duration = math.max((target - start).Magnitude / math.max(Farm.Speed, 1), 0.05)
-    local t0 = os.clock()
-    while os.clock() - t0 < duration do
-        if not Farm.Enabled or not root.Parent or not Farm.canMove() then return false end
-        local alpha = (os.clock() - t0) / duration
-        root.CFrame = CFrame.new(start:Lerp(target, alpha))
-        root.AssemblyLinearVelocity = Vector3.zero
-        RunService.Heartbeat:Wait()
-    end
+    if not Farm.Enabled or not root.Parent then return false end
     root.CFrame = CFrame.new(target)
     root.AssemblyLinearVelocity = Vector3.zero
     return true
@@ -1049,17 +1036,114 @@ task.spawn(function()
                             if not bestDist or d < bestDist then best, bestDist = model, d end
                         end
                         if not best then break end
-                        if not Farm.travel(root, best.PrimaryPart.Position + Vector3.new(0, 2, 0)) then break end
-                        -- el juego lo junta solo al estar cerca: se espera a que desaparezca (max. 2 s)
-                        local t0 = os.clock()
-                        while best.Parent and os.clock() - t0 < 2 do task.wait(0.1) end
+                        -- se queda en ese ticket hasta que el juego lo junte (el modelo se borra al juntarlo, o cuando vence a
+                        -- los 60 s). Si algo lo mueve, vuelve al ticket. No va por otro hasta terminar con este.
+                        local target = best.PrimaryPart.Position + Vector3.new(0, 2, 0)
+                        local stopped = false
+                        while best.Parent and best.PrimaryPart do
+                            if not Farm.Enabled or not Farm.canMove() or not root.Parent then stopped = true break end
+                            if (root.Position - target).Magnitude > 6 then Farm.travel(root, target) end
+                            task.wait(0.1)
+                        end
+                        if stopped then break end
                     end
+                    -- con el AFK prendido siempre vuelve al bloque; si no, a donde estaba (si "Volver" esta prendido)
+                    if More.afkReturn and More.afkReturn() then return end
                     if Farm.Return and Farm.Enabled and Farm.canMove() and root.Parent then Farm.travel(root, home.Position) end
                 end)
                 Farm.Busy = false
             end
         end
     end
+end)
+
+-- ---------- AFK ----------
+-- Te lleva a una plataforma en el cielo, muy lejos del mapa (los bots no llegan). La plataforma es local, grande, con el
+-- logo de Hydra de fondo. Si reapareces con el AFK prendido, te vuelve a llevar. Ademas evita que Roblox te saque por
+-- estar quieto (Players.LocalPlayer.Idled). Al apagarlo volves a donde estabas.
+-- Con el auto farm: sale de la plataforma a juntar los tickets y despues vuelve a ella.
+local AFK = {Enabled = false, Home = nil, Platform = nil, SPOT = Vector3.new(9000, 1600, 9000), LOGO = "rbxassetid://114974832117287"}
+function AFK.build()
+    if AFK.Platform and AFK.Platform.Parent then return AFK.Platform end
+    local model = Instance.new("Model")
+    model.Name = "HydraAFK"
+    local base = Instance.new("Part")
+    base.Name = "Base"
+    base.Size = Vector3.new(70, 4, 70)
+    base.Anchored = true
+    base.CanCollide = true
+    base.Material = Enum.Material.SmoothPlastic
+    base.Color = Color3.fromRGB(14, 15, 20)
+    base.CFrame = CFrame.new(AFK.SPOT)
+    base.Parent = model
+    for _, face in ipairs({Enum.NormalId.Top, Enum.NormalId.Bottom}) do
+        local decal = Instance.new("Decal")
+        decal.Face = face
+        decal.Texture = AFK.LOGO
+        decal.Parent = base
+    end
+    -- borde con brillo y una luz suave
+    local edge = Instance.new("SelectionBox")
+    edge.Adornee = base
+    edge.LineThickness = 0.25
+    edge.Color3 = Color3.fromRGB(235, 238, 245)
+    edge.SurfaceTransparency = 1
+    edge.Parent = base
+    local light = Instance.new("PointLight")
+    light.Range = 40
+    light.Brightness = 1.5
+    light.Color = Color3.fromRGB(235, 238, 245)
+    light.Parent = base
+    model.PrimaryPart = base
+    model.Parent = workspace
+    AFK.Platform = model
+    return model
+end
+function AFK.goUp()
+    local root = More.myRoot()
+    if not root then return false end
+    AFK.build()
+    root.CFrame = CFrame.new(AFK.SPOT + Vector3.new(0, 6, 0))
+    root.AssemblyLinearVelocity = Vector3.zero
+    return true
+end
+function AFK.set(on)
+    AFK.Enabled = on
+    More.afkReturn = on and function() return AFK.Enabled and AFK.goUp() end or nil
+    local root = More.myRoot()
+    if on then
+        AFK.Home = root and root.CFrame or nil
+        AFK.goUp()
+    else
+        if root and AFK.Home then
+            root.CFrame = AFK.Home
+            root.AssemblyLinearVelocity = Vector3.zero
+        end
+        AFK.Home = nil
+        if AFK.Platform then AFK.Platform:Destroy() AFK.Platform = nil end
+    end
+end
+-- si reapareces o el juego te mueve de la plataforma, te vuelve a subir
+task.spawn(function()
+    while true do
+        task.wait(0.25)
+        if AFK.Enabled then
+            pcall(function()
+                local root = More.myRoot()
+                -- mientras el auto farm junta tickets no se lo interrumpe: al terminar vuelve solo a la plataforma
+                if root and not Farm.Busy and (root.Position - AFK.SPOT).Magnitude > 80 then AFK.goUp() end
+            end)
+        end
+    end
+end)
+-- anti-AFK de Roblox (no te saca a los 20 minutos)
+LocalPlayer.Idled:Connect(function()
+    if not AFK.Enabled then return end
+    pcall(function()
+        local vu = game:GetService("VirtualUser")
+        vu:CaptureController()
+        vu:ClickButton2(Vector2.new())
+    end)
 end)
 
 -- ---------- interfaz ----------
@@ -1080,6 +1164,7 @@ Hydra:AddTranslations({
     ["Directo"] = "Instant", ["Aparece en el ticket sin deslizarse"] = "Appears on the ticket without gliding",
     ["Volver"] = "Return", ["Al terminar vuelve a donde estabas"] = "When done, goes back to where you were",
     ["DERRIBADO"] = "DOWNED", ["CARGADO"] = "CARRIED",
+    ["Te deja en una plataforma en el cielo, lejos de todo"] = "Leaves you on a platform in the sky, far from everything",
 })
 ESP.gui()
 local TabMore = Hydra:Tab({Id = "More", Title = "More", Caption = "MORE", Icon = "rbxassetid://114688401779019"})
@@ -1116,11 +1201,10 @@ DownToggle:Toggle({Id = "espDownArrows", Title = "Flechas en el borde", Desc = "
 DownToggle:Toggle({Id = "espDownOutline", Title = "Contorno", Desc = "Silueta a trav\195\169s de paredes", Default = true, Callback = function(on) ESP.Downed.Outline = on end})
 
 TabMore:Section("Farm", "\226\158\164")
+TabMore:Toggle({Id = "afk", Title = "AFK", Desc = "Te deja en una plataforma en el cielo, lejos de todo", Icon = "\226\158\164", Keybind = true, Floating = true,
+    Callback = function(on) AFK.set(on) end})
 local FarmToggle = TabMore:Toggle({Id = "ticketFarm", Title = "Auto farm tickets", Desc = "Junta los tickets del mapa solo", Icon = "\226\158\164", Keybind = true, Floating = true,
     Callback = function(on) Farm.Enabled = on end})
-FarmToggle:Slider({Id = "farmSpeed", Title = "Velocidad de viaje", Desc = "Qu\195\169 tan r\195\161pido va a cada ticket", Min = 25, Max = 500, Step = 5, Default = 150, Suffix = " m/s",
-    Callback = function(v) Farm.Speed = v end})
-FarmToggle:Toggle({Id = "farmInstant", Title = "Directo", Desc = "Aparece en el ticket sin deslizarse", Callback = function(on) Farm.Instant = on end})
 FarmToggle:Toggle({Id = "farmReturn", Title = "Volver", Desc = "Al terminar vuelve a donde estabas", Default = true, Callback = function(on) Farm.Return = on end})
 
 -- valores guardados (el Callback de los sliders y sub-opciones solo corre cuando cambian)
@@ -1129,4 +1213,4 @@ AutoRevive.Range = Hydra.Options.reviveRange:Get()
 ESP.Players.MaxDist, ESP.Players.Names, ESP.Players.Health = Hydra.Options.espDist:Get(), Hydra.Options.espNames:Get(), Hydra.Options.espHealth:Get()
 ESP.Players.Arrows, ESP.Players.Tracers, ESP.Players.Outline = Hydra.Options.espArrows:Get(), Hydra.Options.espLines:Get(), Hydra.Options.espOutline:Get()
 ESP.Downed.MaxDist, ESP.Downed.Arrows, ESP.Downed.Outline = Hydra.Options.espDownDist:Get(), Hydra.Options.espDownArrows:Get(), Hydra.Options.espDownOutline:Get()
-Farm.Speed, Farm.Instant, Farm.Return = Hydra.Options.farmSpeed:Get(), Hydra.Options.farmInstant:Get(), Hydra.Options.farmReturn:Get()
+Farm.Return = Hydra.Options.farmReturn:Get()
