@@ -917,11 +917,25 @@ function ESP.entry(player)
     dist.BackgroundTransparency = 1
     dist.Size = UDim2.fromScale(1, 1)
     dist.Font = Enum.Font.GothamBlack
-    dist.TextSize = 10
+    dist.TextSize = 9
     dist.TextColor3 = ESP.WHITE
     dist.Parent = dot
     arrow.Parent = screen
-    e.arrow, e.tip, e.dot, e.dotStroke, e.arrowText = arrow, tip, dot, dotStroke, dist
+    -- nombre chiquito debajo del circulo, para saber a quien apunta
+    local arrowName = Instance.new("TextLabel")
+    arrowName.BackgroundTransparency = 1
+    arrowName.AnchorPoint = Vector2.new(0.5, 0)
+    arrowName.Position = UDim2.new(0.5, 0, 1, 2)
+    arrowName.Size = UDim2.fromOffset(90, 12)
+    arrowName.Font = Enum.Font.GothamBold
+    arrowName.TextSize = 10
+    arrowName.TextColor3 = ESP.WHITE
+    local nameOutline = Instance.new("UIStroke")
+    nameOutline.Thickness = 1.2
+    nameOutline.Transparency = 0.3
+    nameOutline.Parent = arrowName
+    arrowName.Parent = dot
+    e.arrow, e.tip, e.dot, e.dotStroke, e.arrowText, e.arrowName = arrow, tip, dot, dotStroke, dist, arrowName
     -- linea desde abajo de la pantalla
     local line = Instance.new("Frame")
     line.AnchorPoint = Vector2.new(0.5, 0.5)
@@ -949,23 +963,47 @@ function ESP.hide(e)
     e.line.Visible = false
     if e.hl then e.hl.Enabled = false end
 end
-function ESP.outline(e, char, color, on)
+-- En Evade el cuerpo que se VE no es el personaje (Workspace.Players tiene solo la caja de colision): es el "rig" de
+-- RigService (Workspace.Rigs), que se busca por el Tag del personaje (RigService:GetRigFromTag, verificado). Igual que
+-- Yin Yang, la silueta va sobre ese rig y usa el resaltado del silbato del juego (Actions.Whistle.WhistleHighlight).
+function ESP.rigModel(char)
+    if ESP.rigService == nil then
+        local ok, svc = pcall(function() return require(Core.module("Services", "Asset", "RigService")) end)
+        ESP.rigService = (ok and type(svc) == "table") and svc or false
+    end
+    local tag = char:GetAttribute("Tag")
+    if ESP.rigService and tag then
+        local ok, rig = pcall(function() return ESP.rigService:GetRigFromTag(tag) end)
+        if ok and rig and typeof(rig.Model) == "Instance" and rig.Model:IsA("Model") and rig.Model.Parent then return rig.Model end
+    end
+    return char
+end
+function ESP.template()
+    if ESP.whistle == nil then
+        local found = Core.module("Objects", "Game", "Character", "ActionVisuals", "Actions", "Whistle")
+        ESP.whistle = found and found:FindFirstChild("WhistleHighlight") or false
+    end
+    return ESP.whistle or nil
+end
+function ESP.outline(e, char, model, color, on)
     if not on then
         if e.hl then e.hl.Enabled = false end
         return
     end
     if not e.hl or e.hl.Parent ~= char then
         if e.hl then pcall(function() e.hl:Destroy() end) end
-        local hl = Instance.new("Highlight")
+        local template = ESP.template()
+        local hl = template and template:Clone() or Instance.new("Highlight")
         hl.Name = "HydraHL"
         hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-        hl.FillTransparency = 0.5
-        hl.OutlineTransparency = 0
-        hl.Adornee = char
+        if not template then
+            hl.FillTransparency = 0.5
+            hl.OutlineTransparency = 0
+        end
         hl.Parent = char
         e.hl = hl
     end
-    e.hl.Adornee = char
+    e.hl.Adornee = model
     e.hl.FillColor = color
     e.hl.OutlineColor = color
     e.hl.Enabled = true
@@ -990,14 +1028,16 @@ function ESP.step()
                 local cfg = downed and ESP.Downed or ESP.Players
                 -- si el derribado no tiene su ESP prendido, se muestra con el de jugadores (sin datos de derribado)
                 if downed and not ESP.Downed.Enabled then cfg, downed = ESP.Players, false end
-                local distance = myRoot and (root.Position - myRoot.Position).Magnitude or 0
+                -- distancia desde tu personaje (o desde la camara si estas en el menu / espectando)
+                local distance = (root.Position - (myRoot and myRoot.Position or cam.CFrame.Position)).Magnitude
                 if not cfg.Enabled or distance > cfg.MaxDist then
                     ESP.hide(e)
                 else
                     local color = downed and ESP.RED or ESP.WHITE
-                    ESP.outline(e, char, color, cfg.Outline)
+                    local model = ESP.rigModel(char)
+                    ESP.outline(e, char, model, color, cfg.Outline)
                     -- cartel arriba de la cabeza
-                    e.bb.Adornee = char:FindFirstChild("Head") or root
+                    e.bb.Adornee = model:FindFirstChild("Head", true) or root
                     e.bb.Enabled = true
                     e.tag.Visible = downed
                     if downed then
@@ -1034,7 +1074,9 @@ function ESP.step()
                         e.dot.Rotation = -math.deg(angle)
                         e.tip.BackgroundColor3 = color
                         e.dotStroke.Color = color
-                        e.arrowText.Text = math.floor(distance + 0.5) .. ""
+                        e.arrowText.Text = math.floor(distance + 0.5) .. "m"
+                        e.arrowName.Text = player.DisplayName
+                        e.arrowName.TextColor3 = color
                         e.arrowText.TextColor3 = color
                         e.arrow.Visible = true
                     else
@@ -1222,6 +1264,98 @@ LocalPlayer.Idled:Connect(function()
     end)
 end)
 
+-- ---------- Anti Bot ----------
+-- Misma logica que Yin Yang (Anti Bot v2): si un nextbot se acerca a menos de la distancia elegida, te mueve al lugar
+-- MAS SEGURO: prueba puntos alejandose del bot (atras y en abanico, 35 a 70 studs) y junto a jugadores vivos; descarta
+-- los que quedan cerca de cualquier bot; cada punto necesita piso debajo y lugar para pararse.
+-- Los bots son personajes de CharacterService con AI = true (verificado). No actua si estas derribado o te cargan,
+-- ni mientras estas AFK o el auto farm esta juntando.
+local AntiBot = {Enabled = false, Distance = 10, Cooldown = 0.15, Last = 0, rays = RaycastParams.new(), acc = 0}
+AntiBot.rays.FilterType = Enum.RaycastFilterType.Exclude
+function AntiBot.ignore(char)
+    local list = {char}
+    for _, name in ipairs({"Players", "Rigs"}) do
+        local folder = workspace:FindFirstChild(name)
+        if folder then list[#list + 1] = folder end
+    end
+    return list
+end
+function AntiBot.safeSpot(candidate, char)
+    AntiBot.rays.FilterDescendantsInstances = AntiBot.ignore(char)
+    local down = workspace:Raycast(candidate + Vector3.new(0, 50, 0), Vector3.new(0, -1000, 0), AntiBot.rays)
+    if not down then return nil end
+    local spot = Vector3.new(candidate.X, down.Position.Y + 3, candidate.Z)
+    if workspace:Raycast(spot, Vector3.new(0, 5, 0), AntiBot.rays) then return nil end
+    return spot
+end
+function AntiBot.step()
+    local now = os.clock()
+    if now - AntiBot.Last < AntiBot.Cooldown or AFK.Enabled or Farm.Busy then return end
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local svc = More.service()
+    local me = More.data(LocalPlayer)
+    if not root or not svc or not me then return end
+    if More.reg(me, "Downed") or More.isSet(More.reg(me, "Carried")) then return end
+    local ok, chars = pcall(function() return svc:GetCharacters() end)
+    if not ok or type(chars) ~= "table" then return end
+    local myPos = root.Position
+    local bots, nearest, nearestDist = {}, nil, math.huge
+    local alive = {}
+    for _, v in pairs(chars) do
+        if type(v) == "table" and v.Done and v.PrimaryPart then
+            local okPos, pos = pcall(function() return v.PrimaryPart.Position end)
+            if okPos then
+                if v.AI == true then
+                    bots[#bots + 1] = pos
+                    local d = (pos - myPos).Magnitude
+                    if d < nearestDist then nearest, nearestDist = pos, d end
+                elseif not v.Local and v.PlayerReference and not More.reg(v, "Downed") and not More.isSet(More.reg(v, "Carried")) then
+                    alive[#alive + 1] = pos
+                end
+            end
+        end
+    end
+    if not nearest or nearestDist >= AntiBot.Distance then return end
+    local function clearance(p)
+        local m = math.huge
+        for _, b in ipairs(bots) do m = math.min(m, (b - p).Magnitude) end
+        return m
+    end
+    local candidates = {}
+    local away = (myPos - nearest) * Vector3.new(1, 0, 1)
+    away = away.Magnitude < 0.1 and Vector3.new(1, 0, 0) or away.Unit
+    for _, angle in ipairs({0, 35, -35, 70, -70}) do
+        local dir = CFrame.Angles(0, math.rad(angle), 0):VectorToWorldSpace(away)
+        for _, radius in ipairs({45, 70, 35}) do candidates[#candidates + 1] = myPos + dir * radius end
+    end
+    for _, pos in ipairs(alive) do
+        candidates[#candidates + 1] = pos + Vector3.new(math.random(-5, 5), 0, math.random(-5, 5))
+    end
+    local minSafe = math.max(AntiBot.Distance * 2, 30)
+    local best, bestScore, checks = nil, -math.huge, 0
+    for _, c in ipairs(candidates) do
+        local score = clearance(c)
+        if score >= minSafe and score > bestScore then
+            checks = checks + 1
+            local spot = AntiBot.safeSpot(c, char)
+            if spot then best, bestScore = spot, score end
+            if checks >= 12 then break end
+        end
+    end
+    if not best then return end
+    local look = (best - nearest) * Vector3.new(1, 0, 1)
+    root.CFrame = look.Magnitude > 0.1 and CFrame.new(best, best + look) or CFrame.new(best)
+    AntiBot.Last = now
+end
+RunService.Heartbeat:Connect(function(dt)
+    if not AntiBot.Enabled then return end
+    AntiBot.acc = AntiBot.acc + dt
+    if AntiBot.acc < 0.1 then return end
+    AntiBot.acc = 0
+    pcall(AntiBot.step)
+end)
+
 -- ---------- interfaz ----------
 Hydra:AddTranslations({
     ["Ayuda"] = "Help", ["Visual"] = "Visual", ["Farm"] = "Farm",
@@ -1241,6 +1375,9 @@ Hydra:AddTranslations({
     ["Volver"] = "Return", ["Al terminar vuelve a donde estabas"] = "When done, goes back to where you were",
     ["DERRIBADO"] = "DOWNED", ["CARGADO"] = "CARRIED",
     ["Te deja en una plataforma en el cielo, lejos de todo"] = "Leaves you on a platform in the sky, far from everything",
+    ["Te aleja de los nextbots cuando se acercan"] = "Moves you away from nextbots when they get close",
+    ["Distancia de reacci\195\179n"] = "Reaction distance", ["Si un bot est\195\161 m\195\161s cerca, te mueve"] = "If a bot is closer, it moves you",
+    ["Entre teletransportes"] = "Between teleports",
 })
 ESP.gui()
 local TabMore = Hydra:Tab({Id = "More", Title = "More", Caption = "MORE", Icon = "rbxassetid://114688401779019"})
@@ -1258,6 +1395,12 @@ ReviveToggle:Slider({Id = "reviveRange", Title = "Distancia", Desc = "Hasta qu\1
     Callback = function(v) AutoRevive.Range = v end})
 TabMore:Toggle({Id = "autoSpawn", Title = "Auto Spawn", Desc = "Si qued\195\161s derribado, vuelve a aparecer solo", Icon = "\226\156\166", Keybind = true, Floating = true,
     Callback = function(on) AutoSpawn.Enabled = on end})
+local AntiBotToggle = TabMore:Toggle({Id = "antiBot", Title = "Anti Bot", Desc = "Te aleja de los nextbots cuando se acercan", Icon = "\226\156\166", Keybind = true, Floating = true,
+    Callback = function(on) AntiBot.Enabled = on end})
+AntiBotToggle:Slider({Id = "antiBotDist", Title = "Distancia de reacci\195\179n", Desc = "Si un bot est\195\161 m\195\161s cerca, te mueve", Min = 1, Max = 25, Step = 1, Default = 10, Suffix = " m",
+    Callback = function(v) AntiBot.Distance = v end})
+AntiBotToggle:Slider({Id = "antiBotCd", Title = "Espera", Desc = "Entre teletransportes", Min = 0.05, Max = 2, Step = 0.05, Default = 0.15, Suffix = " s",
+    Callback = function(v) AntiBot.Cooldown = v end})
 
 TabMore:Section("Visual", "\226\151\142")
 local EspToggle = TabMore:Toggle({Id = "espPlayers", Title = "ESP jugadores", Desc = "Encontr\195\161 a todos, incluso a trav\195\169s de paredes", Icon = "\226\151\142", Keybind = true, Floating = true,
@@ -1290,6 +1433,7 @@ ESP.Players.MaxDist, ESP.Players.Names, ESP.Players.Health = Hydra.Options.espDi
 ESP.Players.Arrows, ESP.Players.Tracers, ESP.Players.Outline = Hydra.Options.espArrows:Get(), Hydra.Options.espLines:Get(), Hydra.Options.espOutline:Get()
 ESP.Downed.MaxDist, ESP.Downed.Arrows, ESP.Downed.Outline = Hydra.Options.espDownDist:Get(), Hydra.Options.espDownArrows:Get(), Hydra.Options.espDownOutline:Get()
 Farm.Return = Hydra.Options.farmReturn:Get()
+AntiBot.Distance, AntiBot.Cooldown = Hydra.Options.antiBotDist:Get(), Hydra.Options.antiBotCd:Get()
 
 -- ==================== PESTANA EXTRA: UNLOCK ALL ====================
 -- Desbloquea de forma VISUAL (solo en tu pantalla) emotes, cosmeticos, personajes, unusuals, perks, animaciones de
