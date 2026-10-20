@@ -1,5 +1,3 @@
--- HYDRA - Evade (usa la libreria de forma externa)
--- La libreria (Hydra_Lib.lua) se carga desde GitHub
 local HYDRA_URL = "https://raw.githubusercontent.com/ZINZEROX/Ni/refs/heads/main/UIV2"
 
 local Hydra = loadstring(game:HttpGet(HYDRA_URL))()
@@ -9,14 +7,6 @@ local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer = Players.LocalPlayer
 
--- ==================== NUCLEO: acceso al movimiento de Evade ====================
--- Verificado en el codigo actual de Evade (extraccion 19/10):
---  - ReplicatedStorage.Objects.Game.Character.Client.Movement: el juego llama Movement:Update(dt) cada cuadro
---    (Character.lua), con self.DataRegistry ("Grounded", "Velocity" en unidades x90), self.JumpHeldDown y self:AttemptJump().
---  - CharacterService:GetCharacterFromPlayer(jugador).Movement.MoveStats: Modifiers + Reset() es lo mismo que hace
---    el evento ModifyMovement del juego. JumpCap = 1 en BaseStats (0 saltos en el aire); cada punto extra = 1 salto mas.
--- En Solara require() crea copias de los modulos: ahi se usa un modo sin require (Stepped) para Speed Front
--- y firesignal (si existe) para Jump Layers.
 local Core = {steps = {}, preSteps = {}, hooked = false, safeMode = false}
 pcall(function()
     if identifyexecutor then
@@ -32,7 +22,6 @@ function Core.module(...)
     return node
 end
 
--- engancha Movement.Update una sola vez; cada funcion de Core.steps corre despues del Update del juego
 function Core.hook()
     if Core.hooked then return true end
     if Core.safeMode then
@@ -54,7 +43,7 @@ function Core.hook()
     if not ok or type(Movement) ~= "table" or type(Movement.Update) ~= "function" then return false end
     local old = Movement.Update
     Movement.Update = function(self, dt, ...)
-        -- pasos que corren ANTES del juego (por ejemplo, devolver la friccion al soltar el slide)
+
         if self.Character and self.Character == LocalPlayer.Character then
             for _, fn in pairs(Core.preSteps) do pcall(fn, self) end
         end
@@ -73,7 +62,6 @@ function Core.hook()
     return true
 end
 
--- cambia un valor de movimiento del personaje (como el evento ModifyMovement del juego); nil = vuelve al normal
 function Core.setModifier(name, value)
     if not Core.safeMode then
         local ok = pcall(function()
@@ -94,10 +82,6 @@ function Core.setModifier(name, value)
     return (pcall(fire, event.OnClientEvent, tag, "ModifyMovement", {name, value}))
 end
 
--- ==================== SPEED ====================
--- Velocidad del personaje en studs/s (la velocidad tope corriendo). Evade de fabrica: Speed 1500 y SprintCap 2 en
--- BaseStats (verificado) = 1500 x 2 / 90 = 33 studs/s. Se cambia "Speed" con un Modifier (lo mismo que hace el evento
--- ModifyMovement del juego), asi que siguen andando el arranque del sprint, agacharse, emotes y perks.
 local SP = {Enabled = false, Value = 55, Token = 0, SPRINT_CAP = 2}
 function SP.apply()
     if SP.Enabled then return Core.setModifier("Speed", SP.Value * 90 / SP.SPRINT_CAP) end
@@ -116,9 +100,6 @@ LocalPlayer.CharacterAdded:Connect(function()
     end)
 end)
 
--- ==================== ADJUST JUMP ====================
--- Altura del salto en studs: "JumpHeight" de MoveStats (BaseStats = 3, verificado). Movement:Jump hace
--- Humanoid.JumpHeight = JumpHeight de las stats, asi que con un Modifier vale para todos los saltos (tambien los del aire).
 local AJ = {Enabled = false, Height = 10, Token = 0}
 function AJ.apply()
     if AJ.Enabled then return Core.setModifier("JumpHeight", AJ.Height) end
@@ -137,16 +118,10 @@ LocalPlayer.CharacterAdded:Connect(function()
     end)
 end)
 
--- ==================== SPEED FRONT / BACK FRONT ====================
--- Movimiento de Dara Trimp (velocidad horizontal hacia donde miras, con aceleracion suave) + lo de Trimp x Frontal
--- para no trabarse: un rayo a la altura de la rodilla ve rampas y obstaculos. En el piso salta solo; en el aire los usa
--- de rampa. Multiplicador de rampa ajustable (sube con fuerza x multiplicador y gana velocidad por un momento).
--- Back Front es lo mismo pero hacia atras de la camara (sign = -1). Las dos no pueden estar prendidas a la vez.
 local Front = {rays = RaycastParams.new()}
 Front.rays.FilterType = Enum.RaycastFilterType.Exclude
 pcall(function() Front.rays.RespectCanCollide = true end)
 
--- rampa u obstaculo en la direccion de avance (ignora jugadores, bots, piso plano, pendientes suaves y paredes de costado)
 function Front.obstacle(char, root, dir, speed)
     local ignore = {char}
     for _, name in ipairs({"Players", "Rigs"}) do
@@ -194,7 +169,7 @@ function Front.new(sign)
         if dir then F.Dir = dir end
         local now = os.clock()
         local target = moving and F.MaxSpeed or 0
-        -- despues de una rampa, un empujon de velocidad que se va apagando (multiplicador de rampa)
+
         if F.RampSpeedBoost and now < F.BoostUntil and moving then
             local left = (F.BoostUntil - now) / 0.8
             target = target * (1 + (F.RampMult - 1) * 0.5 * left)
@@ -212,7 +187,7 @@ function Front.new(sign)
 
         if not moving or F.Speed <= 3 then F.Seen = 0 return end
         local hit, isRamp = Front.obstacle(ctx.char, ctx.root, F.Dir, F.Speed)
-        F.Seen = hit and F.Seen + 1 or 0 -- tiene que verse 2 cuadros seguidos
+        F.Seen = hit and F.Seen + 1 or 0
         if F.Seen < 2 then return end
         local lift = F.RampPower * F.RampMult * 0.8
         if ctx.grounded and now - F.LastAuto > 0.45 then
@@ -234,10 +209,6 @@ local BF = Front.new(-1)
 Core.steps.speedFront = SF.step
 Core.steps.backFront = BF.step
 
--- ==================== SPEED WITH JUMP ====================
--- Salta solo como un conejo y en el aire seguis caminando normal: Evade no deja acelerar hacia adelante en el aire
--- (Functions.Air anula el "adelante" de MoveDirection, verificado en el codigo del juego), asi que en el aire se
--- pone la velocidad hacia donde caminas con la misma rapidez que traias en el piso (x el multiplicador).
 local SWJ = {Enabled = false, Power = 34, Delay = 0, AirMult = 1, OnlyMoving = true, GroundSpeed = 0, Last = 0}
 Core.steps.speedWithJump = function(ctx)
     if not SWJ.Enabled then return end
@@ -260,11 +231,6 @@ Core.steps.speedWithJump = function(ctx)
     end
 end
 
--- ==================== INFINITE SLIDE ====================
--- Misma logica de Yin Yang (Dara): mientras estas en Slide y mantenes agacharte, la friccion del slide pasa a ser
--- negativa (-Velocidad): el slide no frena y acelera. Estados verificados en StateInfo: Slide, EmotingSlide, CarrySlide.
--- Arreglos de Yin Yang (v53/v54): al soltar agacharte la friccion vuelve a 5 ANTES de que el juego calcule (si no, te
--- manda volando) y durante 0,4 s se limita la velocidad al tope de correr y el "salto" hacia arriba al pararte.
 local IS = {Enabled = false, Boost = 8, Applied = nil, ExitUntil = 0, Cap = 3000, Jumped = false,
     SLIDES = {Slide = true, EmotingSlide = true, CarrySlide = true}}
 function IS.crouchHeld(movement)
@@ -295,7 +261,7 @@ function IS.exitGuard(movement)
     if flat.Magnitude > cap / 90 then flat = flat.Unit * (cap / 90) end
     root.AssemblyLinearVelocity = Vector3.new(flat.X, vy, flat.Z)
 end
--- antes del juego: si soltaste agacharte con la friccion negativa puesta, vuelve a la normal en el acto
+
 Core.preSteps.infiniteSlide = function(movement)
     if os.clock() < IS.ExitUntil then pcall(IS.exitGuard, movement) end
     if IS.Applied == nil or IS.crouchHeld(movement) then return end
@@ -308,7 +274,7 @@ Core.preSteps.infiniteSlide = function(movement)
     IS.ExitUntil = os.clock() + 0.4
     pcall(IS.exitGuard, movement)
 end
--- despues del juego: en slide y agachado = friccion negativa
+
 Core.steps.infiniteSlide = function(ctx)
     local movement = ctx.movement
     if not movement then return end
@@ -316,9 +282,6 @@ Core.steps.infiniteSlide = function(ctx)
     IS.setFriction(movement, sliding and -IS.Boost or nil)
 end
 
--- ==================== AUTO CROUCH ====================
--- Se agacha y se levanta solo, las veces por segundo que elijas. Usa la misma entrada que la tecla de agacharse del
--- juego (Movement:KeyUsed con Key = "Crouching" pone "CrouchKey", verificado en el codigo): anda en PC y celular.
 local AC = {Enabled = false, Rate = 1.5, Down = false, Next = 0, Movement = nil}
 Core.steps.autoCrouch = function(ctx)
     if not AC.Enabled or not ctx.movement then return end
@@ -334,14 +297,12 @@ function AC.release()
     AC.Down = false
 end
 
--- ==================== JUMP LAYERS ====================
--- Saltos en el aire: JumpCap del juego. Capas = saltos extra en el aire (1 a 50) -> JumpCap = capas + 1.
 local JL = {Enabled = false, Layers = 3, Token = 0}
 function JL.apply()
     if JL.Enabled then return Core.setModifier("JumpCap", JL.Layers + 1) end
     return Core.setModifier("JumpCap", nil)
 end
--- despues de morir el personaje nuevo tarda en armarse: reintenta unos segundos
+
 LocalPlayer.CharacterAdded:Connect(function()
     JL.Token = JL.Token + 1
     local token = JL.Token
@@ -355,17 +316,8 @@ LocalPlayer.CharacterAdded:Connect(function()
     end)
 end)
 
--- ==================== COLORES DE HYDRA (siempre activos, sin opcion) ====================
--- Verificado en el codigo de Evade:
---  - Derribados fuera de la pantalla: Fear/Notices/NoticeCreator pinta cada cuadro Notice.Skull y Notice.Arrow.ImageLabel
---    con rojo (255,102,102) que se oscurece hacia (20,8,8) segun el tiempo que le queda al derribado. Viven en
---    PlayerGui.Game.HUD.Notices. Aca pasan a blanco, conservando el oscurecimiento (asi se sigue viendo cuanto le queda).
---  - Vida: CharacterStatus.SetHealth pinta HealthIcon, el texto Health y BackgroundStroke.UIStroke de verde (rojo con poca
---    vida) en PlayerGui.Game.HUD.Overlay.CharacterStatus.BottomLeft.Health. Aca quedan siempre en blanco.
--- No se toca ningun modulo del juego: cada vez que el juego cambia el color, se vuelve a poner el nuestro al instante.
 local Paint = {WHITE = Color3.new(1, 1, 1), DARK = Color3.fromRGB(28, 28, 32), last = setmetatable({}, {__mode = "k"})}
 
--- mantiene inst[prop] con el color que devuelve convert(color que puso el juego)
 function Paint.lock(inst, prop, convert)
     if not inst then return end
     local function apply()
@@ -380,7 +332,7 @@ function Paint.lock(inst, prop, convert)
 end
 
 function Paint.white() return Paint.WHITE end
--- rojo del juego -> blanco con el mismo oscurecimiento (R va de 255 a 20 mientras se le acaba el tiempo)
+
 function Paint.downed(color)
     local t = math.clamp((1 - color.R) / (1 - 20 / 255), 0, 1)
     return Paint.WHITE:Lerp(Paint.DARK, t)
@@ -394,10 +346,6 @@ function Paint.notice(frame)
     if arrowImage and arrowImage:IsA("ImageLabel") then Paint.lock(arrowImage, "ImageColor3", Paint.downed) end
 end
 
--- Reloj de la ronda (RoundState, verificado): el juego muestra Overlay.RoundOverlay.RoundTimer.RoundTimer solo en el
--- intermedio (RoundStatus 1) y lo esconde al empezar la ronda (2); en la ronda escribe el tiempo en IngameRoundTimer.Timer.
--- Aca el reloj grande queda siempre visible, copia el tiempo de la ronda, todo en blanco y con efectos: brillo que
--- cruza los numeros, luz que recorre el borde y un pulso en cada segundo (mas fuerte en los ultimos 10).
 Paint.spin = {}
 RunService.Heartbeat:Connect(function(dt)
     for gradient in pairs(Paint.spin) do
@@ -428,15 +376,15 @@ function Paint.roundTimer(container)
     local timer = box:FindFirstChild("Timer")
     local about = box:FindFirstChild("About")
     local stroke = box:FindFirstChildOfClass("UIStroke")
-    -- siempre visible (tambien el contenedor)
+
     Paint.lock(container, "Visible", function() return true end)
     Paint.lock(box, "Visible", function() return true end)
-    -- blanco
+
     Paint.lock(timer, "TextColor3", Paint.white)
     Paint.lock(about, "TextColor3", Paint.white)
     Paint.lock(box:FindFirstChild("ImageLabel"), "ImageColor3", Paint.white)
     Paint.lock(stroke, "Color", Paint.white)
-    -- efectos
+
     Paint.shine(timer)
     Paint.shine(about)
     if stroke then
@@ -463,7 +411,7 @@ function Paint.roundTimer(container)
             tweens:Create(pulse, TweenInfo.new(last and 0.45 or 0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {Scale = 1}):Play()
         end)
     end
-    -- en la ronda el juego escribe el tiempo en el reloj chico: se copia al grande y el chico se esconde
+
     local ingame = container:FindFirstChild("IngameRoundTimer")
     local ingameTimer = ingame and ingame:FindFirstChild("Timer")
     if ingameTimer and timer then
@@ -503,13 +451,12 @@ do
     local playerGui = LocalPlayer:WaitForChild("PlayerGui")
     local current = playerGui:FindFirstChild("Game")
     if current then Paint.hookGame(current) end
-    -- si el juego vuelve a crear su interfaz (respawn), se engancha a la nueva
+
     playerGui.ChildAdded:Connect(function(child)
         if child.Name == "Game" and child:IsA("ScreenGui") then Paint.hookGame(child) end
     end)
 end
 
--- ==================== PESTANA MOVIMIENTO ====================
 Hydra:AddTranslations({
     ["Movimiento"] = "Movement", ["MOVER"] = "MOVE", ["Velocidad"] = "Speed", ["Salto"] = "Jump",
     ["Te lleva hacia adelante sin trabarse"] = "Takes you forward without getting stuck",
@@ -558,7 +505,6 @@ Speed:Slider({Id = "speedValue", Title = "Velocidad", Desc = "Normal del juego: 
     end})
 SP.Value = Hydra.Options.speedValue:Get()
 
--- arma un toggle de movimiento frontal con sus sub-opciones (prefix = ids guardados)
 local function frontToggle(F, other, otherId, prefix, title, desc, icon, followDesc)
     local toggle
     toggle = TabMove:Toggle({Id = prefix == "sf" and "speedFront" or "backFront", Title = title, Desc = desc, Icon = icon, Keybind = true, Floating = true,
@@ -570,7 +516,7 @@ local function frontToggle(F, other, otherId, prefix, title, desc, icon, followD
             end
             F.Enabled = on
             F.Speed = 0
-            -- no pueden ir los dos a la vez
+
             if on and other.Enabled and Hydra.Options[otherId] then Hydra.Options[otherId]:Set(false) end
         end})
     toggle:Slider({Id = prefix .. "Speed", Title = "Velocidad m\195\161xima", Desc = "Hasta qu\195\169 velocidad llega", Min = 10, Max = 200, Step = 1, Default = 99,
@@ -587,7 +533,7 @@ local function frontToggle(F, other, otherId, prefix, title, desc, icon, followD
         Callback = function(on) F.Smooth = on end})
     toggle:Toggle({Id = prefix .. "Follow", Title = "Seguir movimiento", Desc = followDesc,
         Callback = function(on) F.FollowMove = on end})
-    -- los valores guardados se cargan al iniciar (el Callback solo corre cuando cambian)
+
     F.MaxSpeed = Hydra.Options[prefix .. "Speed"]:Get()
     F.Accel = Hydra.Options[prefix .. "Accel"]:Get()
     F.RampMult = Hydra.Options[prefix .. "RampMult"]:Get()
@@ -671,7 +617,6 @@ JumpLayers:Slider({Id = "jlLayers", Title = "Capas", Desc = "Cu\195\161ntas vece
         if JL.Enabled then JL.apply() end
     end})
 
--- valor guardado de las capas
 JL.Layers = Hydra.Options.jlLayers:Get()
 
 local AdjustJump
@@ -691,14 +636,6 @@ AdjustJump:Slider({Id = "ajHeight", Title = "Altura", Desc = "Normal del juego: 
     end})
 AJ.Height = Hydra.Options.ajHeight:Get()
 
--- ==================== PESTANA MORE ====================
--- Todo verificado en el codigo actual de Evade:
---  - Events.Interact:FireServer("Revive", tag, true) empieza a revivir y ("Revive", tag) lo termina; ("Carry", tag) carga
---    (InteractionService/InteractionTypes). El tiempo de revivir es "ReviveLength" del derribado.
---  - Events.SetPlayerMode:FireServer(true) es "jugar" (menu); Auto Spawn lo usa al quedar derribado (como Yin Yang).
---  - CharacterService: DataRegistry "Downed", "DownedPeriod" (1 -> 0 mientras se acaba el tiempo), "Carried",
---    "Carrying", "CanBeCarried", "Ragdolling", "Health".
---  - Tickets: modelos en workspace.Effects.Tickets; el juego los junta solo cuando estas a 14 studs (CollectionMethods.Distance).
 local More = {}
 function More.service()
     if More.svc then return More.svc end
@@ -724,7 +661,6 @@ function More.myRoot()
 end
 function More.event(name) return Core.module("Events", name) end
 
--- ---------- Auto Carry ----------
 local AutoCarry = {Enabled = false, Range = 30, Interval = 0.2}
 task.spawn(function()
     while true do
@@ -755,7 +691,6 @@ task.spawn(function()
     end
 end)
 
--- ---------- Auto Revive ----------
 local AutoRevive = {Enabled = false, Range = 30}
 task.spawn(function()
     while true do
@@ -786,7 +721,6 @@ task.spawn(function()
     end
 end)
 
--- ---------- Auto Spawn ----------
 local AutoSpawn = {Enabled = false, Last = 0}
 task.spawn(function()
     while true do
@@ -804,10 +738,6 @@ task.spawn(function()
     end
 end)
 
--- ---------- ESP ----------
--- Jugadores: contorno a traves de paredes, nombre, distancia y vida arriba de la cabeza, lineas opcionales y flechas en
--- el borde de la pantalla que apuntan a los que no ves (con su distancia). Derribados: lo mismo en rojo, con el tiempo
--- que le queda (barra) y si lo estan cargando.
 local ESP = {
     entries = {},
     Players = {Enabled = false, MaxDist = 1500, Names = true, Health = true, Arrows = true, Tracers = false, Outline = true},
@@ -858,7 +788,7 @@ function ESP.bar(parent, width)
     back.Parent = parent
     return back, fill
 end
--- piezas de un jugador (se crean una vez y se reusan)
+
 function ESP.entry(player)
     local e = ESP.entries[player]
     if e then return e end
@@ -887,7 +817,7 @@ function ESP.entry(player)
     e.barBack.LayoutOrder = 4
     bb.Parent = screen
     e.bb = bb
-    -- flecha del borde: un rombo que apunta + la distancia
+
     local arrow = Instance.new("Frame")
     arrow.Size = UDim2.fromOffset(46, 46)
     arrow.AnchorPoint = Vector2.new(0.5, 0.5)
@@ -921,7 +851,7 @@ function ESP.entry(player)
     dist.TextColor3 = ESP.WHITE
     dist.Parent = dot
     arrow.Parent = screen
-    -- nombre chiquito debajo del circulo, para saber a quien apunta
+
     local arrowName = Instance.new("TextLabel")
     arrowName.BackgroundTransparency = 1
     arrowName.AnchorPoint = Vector2.new(0.5, 0)
@@ -936,7 +866,7 @@ function ESP.entry(player)
     nameOutline.Parent = arrowName
     arrowName.Parent = dot
     e.arrow, e.tip, e.dot, e.dotStroke, e.arrowText, e.arrowName = arrow, tip, dot, dotStroke, dist, arrowName
-    -- linea desde abajo de la pantalla
+
     local line = Instance.new("Frame")
     line.AnchorPoint = Vector2.new(0.5, 0.5)
     line.BorderSizePixel = 0
@@ -963,9 +893,7 @@ function ESP.hide(e)
     e.line.Visible = false
     if e.hl then e.hl.Enabled = false end
 end
--- En Evade el cuerpo que se VE no es el personaje (Workspace.Players tiene solo la caja de colision): es el "rig" de
--- RigService (Workspace.Rigs), que se busca por el Tag del personaje (RigService:GetRigFromTag, verificado). Igual que
--- Yin Yang, la silueta va sobre ese rig y usa el resaltado del silbato del juego (Actions.Whistle.WhistleHighlight).
+
 function ESP.rigModel(char)
     if ESP.rigService == nil then
         local ok, svc = pcall(function() return require(Core.module("Services", "Asset", "RigService")) end)
@@ -1026,9 +954,9 @@ function ESP.step()
                 local data = More.data(player)
                 local downed = data and More.reg(data, "Downed") == true
                 local cfg = downed and ESP.Downed or ESP.Players
-                -- si el derribado no tiene su ESP prendido, se muestra con el de jugadores (sin datos de derribado)
+
                 if downed and not ESP.Downed.Enabled then cfg, downed = ESP.Players, false end
-                -- distancia desde tu personaje (o desde la camara si estas en el menu / espectando)
+
                 local distance = (root.Position - (myRoot and myRoot.Position or cam.CFrame.Position)).Magnitude
                 if not cfg.Enabled or distance > cfg.MaxDist then
                     ESP.hide(e)
@@ -1036,7 +964,7 @@ function ESP.step()
                     local color = downed and ESP.RED or ESP.WHITE
                     local model = ESP.rigModel(char)
                     ESP.outline(e, char, model, color, cfg.Outline)
-                    -- cartel arriba de la cabeza
+
                     e.bb.Adornee = model:FindFirstChild("Head", true) or root
                     e.bb.Enabled = true
                     e.tag.Visible = downed
@@ -1063,7 +991,7 @@ function ESP.step()
                         e.bar.Size = UDim2.fromScale(fraction, 1)
                         e.bar.BackgroundColor3 = downed and ESP.RED:Lerp(Color3.fromRGB(90, 20, 20), 1 - fraction) or ESP.WHITE
                     end
-                    -- en pantalla o flecha en el borde
+
                     local point, onScreen = cam:WorldToViewportPoint(root.Position)
                     local visible = onScreen and point.Z > 0
                     if not visible and cfg.Arrows then
@@ -1109,7 +1037,6 @@ RunService.RenderStepped:Connect(function()
     end
 end)
 
--- ---------- Auto Farm de tickets ----------
 local Farm = {Enabled = false, Return = true, Busy = false}
 function Farm.tickets()
     local effects = workspace:FindFirstChild("Effects")
@@ -1128,7 +1055,7 @@ function Farm.canMove()
     local me = More.data(LocalPlayer)
     return hum and hum.Health > 0 and not (me and More.reg(me, "Downed"))
 end
--- se teletransporta directo a la posicion
+
 function Farm.travel(root, target)
     if not Farm.Enabled or not root.Parent then return false end
     root.CFrame = CFrame.new(target)
@@ -1147,15 +1074,14 @@ task.spawn(function()
                     local home = root.CFrame
                     for _ = 1, #list do
                         if not Farm.Enabled or not Farm.canMove() then break end
-                        -- el mas cercano primero
+
                         local best, bestDist
                         for _, model in ipairs(Farm.tickets()) do
                             local d = (model.PrimaryPart.Position - root.Position).Magnitude
                             if not bestDist or d < bestDist then best, bestDist = model, d end
                         end
                         if not best then break end
-                        -- se queda en ese ticket hasta que el juego lo junte (el modelo se borra al juntarlo, o cuando vence a
-                        -- los 60 s). Si algo lo mueve, vuelve al ticket. No va por otro hasta terminar con este.
+
                         local target = best.PrimaryPart.Position + Vector3.new(0, 2, 0)
                         local stopped = false
                         while best.Parent and best.PrimaryPart do
@@ -1165,7 +1091,7 @@ task.spawn(function()
                         end
                         if stopped then break end
                     end
-                    -- con el AFK prendido siempre vuelve al bloque; si no, a donde estaba (si "Volver" esta prendido)
+
                     if More.afkReturn and More.afkReturn() then return end
                     if Farm.Return and Farm.Enabled and Farm.canMove() and root.Parent then Farm.travel(root, home.Position) end
                 end)
@@ -1175,11 +1101,6 @@ task.spawn(function()
     end
 end)
 
--- ---------- AFK ----------
--- Te lleva a una plataforma en el cielo, muy lejos del mapa (los bots no llegan). La plataforma es local, grande, con el
--- logo de Hydra de fondo. Si reapareces con el AFK prendido, te vuelve a llevar. Ademas evita que Roblox te saque por
--- estar quieto (Players.LocalPlayer.Idled). Al apagarlo volves a donde estabas.
--- Con el auto farm: sale de la plataforma a juntar los tickets y despues vuelve a ella.
 local AFK = {Enabled = false, Home = nil, Platform = nil, SPOT = Vector3.new(9000, 1600, 9000), LOGO = "rbxassetid://114974832117287"}
 function AFK.build()
     if AFK.Platform and AFK.Platform.Parent then return AFK.Platform end
@@ -1200,7 +1121,7 @@ function AFK.build()
         decal.Texture = AFK.LOGO
         decal.Parent = base
     end
-    -- borde con brillo y una luz suave
+
     local edge = Instance.new("SelectionBox")
     edge.Adornee = base
     edge.LineThickness = 0.25
@@ -1241,20 +1162,20 @@ function AFK.set(on)
         if AFK.Platform then AFK.Platform:Destroy() AFK.Platform = nil end
     end
 end
--- si reapareces o el juego te mueve de la plataforma, te vuelve a subir
+
 task.spawn(function()
     while true do
         task.wait(0.25)
         if AFK.Enabled then
             pcall(function()
                 local root = More.myRoot()
-                -- mientras el auto farm junta tickets no se lo interrumpe: al terminar vuelve solo a la plataforma
+
                 if root and not Farm.Busy and (root.Position - AFK.SPOT).Magnitude > 80 then AFK.goUp() end
             end)
         end
     end
 end)
--- anti-AFK de Roblox (no te saca a los 20 minutos)
+
 LocalPlayer.Idled:Connect(function()
     if not AFK.Enabled then return end
     pcall(function()
@@ -1264,12 +1185,6 @@ LocalPlayer.Idled:Connect(function()
     end)
 end)
 
--- ---------- Anti Bot ----------
--- Misma logica que Yin Yang (Anti Bot v2): si un nextbot se acerca a menos de la distancia elegida, te mueve al lugar
--- MAS SEGURO: prueba puntos alejandose del bot (atras y en abanico, 35 a 70 studs) y junto a jugadores vivos; descarta
--- los que quedan cerca de cualquier bot; cada punto necesita piso debajo y lugar para pararse.
--- Los bots son personajes de CharacterService con AI = true (verificado). No actua si estas derribado o te cargan,
--- ni mientras estas AFK o el auto farm esta juntando.
 local AntiBot = {Enabled = false, Distance = 10, Cooldown = 0.15, Last = 0, rays = RaycastParams.new(), acc = 0}
 AntiBot.rays.FilterType = Enum.RaycastFilterType.Exclude
 function AntiBot.ignore(char)
@@ -1356,7 +1271,6 @@ RunService.Heartbeat:Connect(function(dt)
     pcall(AntiBot.step)
 end)
 
--- ---------- interfaz ----------
 Hydra:AddTranslations({
     ["Ayuda"] = "Help", ["Visual"] = "Visual", ["Farm"] = "Farm",
     ["Carga solo a los derribados cerca tuyo"] = "Carries nearby downed players by itself",
@@ -1426,7 +1340,6 @@ local FarmToggle = TabMore:Toggle({Id = "ticketFarm", Title = "Auto farm tickets
     Callback = function(on) Farm.Enabled = on end})
 FarmToggle:Toggle({Id = "farmReturn", Title = "Volver", Desc = "Al terminar vuelve a donde estabas", Default = true, Callback = function(on) Farm.Return = on end})
 
--- valores guardados (el Callback de los sliders y sub-opciones solo corre cuando cambian)
 AutoCarry.Range, AutoCarry.Interval = Hydra.Options.carryRange:Get(), Hydra.Options.carryDelay:Get()
 AutoRevive.Range = Hydra.Options.reviveRange:Get()
 ESP.Players.MaxDist, ESP.Players.Names, ESP.Players.Health = Hydra.Options.espDist:Get(), Hydra.Options.espNames:Get(), Hydra.Options.espHealth:Get()
@@ -1435,10 +1348,6 @@ ESP.Downed.MaxDist, ESP.Downed.Arrows, ESP.Downed.Outline = Hydra.Options.espDow
 Farm.Return = Hydra.Options.farmReturn:Get()
 AntiBot.Distance, AntiBot.Cooldown = Hydra.Options.antiBotDist:Get(), Hydra.Options.antiBotCd:Get()
 
--- ==================== PESTANA EXTRA: UNLOCK ALL ====================
--- Desbloquea de forma VISUAL (solo en tu pantalla) emotes, cosmeticos, personajes, unusuals, perks, animaciones de
--- cargar, nametags, boombox y skins de herramientas, parcheando los modulos del juego (Items.Registry, Inventory,
--- Loadout, la rueda de emotes, etc.). Modulo completo de Unlock All (necesita que require() de los modulos reales).
 getgenv().HydraScriptText = function(es, en)
     Hydra:AddTranslations({[es] = en})
     return Hydra:T(es)
@@ -2955,14 +2864,7 @@ Hydra:AddTranslations({
 })
 
 local TabExtra = Hydra:Tab({Id = "Extra", Title = "Extra", Caption = "EXTRA", Icon = "\226\156\142"})
--- ==================== AVATAR (al principio de Extra) ====================
--- Cambia tu avatar de forma VISUAL (solo en tu pantalla), igual que Yin Yang:
---  - El cuerpo que se ve en Evade es el rig de Workspace.Rigs.<tu nombre> (RigService.buildRig le pone tu nombre;
---    verificado en la extraccion). Se le aplica la HumanoidDescription del jugador elegido.
---  - En R15 ese rig no tiene HumanoidRootPart (Evade lo une al personaje real con rig.Joints.Root) y Roblox rechaza
---    ApplyDescription sin ella: se pone una raiz temporal invisible solo mientras se aplica y despues se borra.
---  - La ropa y los accesorios que pone el juego no vienen de una HumanoidDescription: se sacan antes de aplicar.
---  - El look se guarda (Hydra_Avatar.json) y se vuelve a poner al entrar y cada vez que Evade arma un rig nuevo.
+
 local Avatar = {FILE = "Hydra_Avatar.json", look = nil, saved = {}, korblox = false, deleted = false, busy = false,
     head = {on = false, conn = nil, faces = {}}, KORBLOX_LEG = 139607718,
     LIST_PROPS = {"HatAccessory", "HairAccessory", "FaceAccessory", "NeckAccessory", "ShouldersAccessory", "FrontAccessory", "BackAccessory", "WaistAccessory"},
@@ -2970,13 +2872,32 @@ local Avatar = {FILE = "Hydra_Avatar.json", look = nil, saved = {}, korblox = fa
         "Shirt", "Pants", "GraphicTShirt", "Face", "Head", "Torso", "LeftArm", "RightArm", "LeftLeg", "RightLeg"},
     COLOR_PROPS = {"HeadColor", "TorsoColor", "LeftArmColor", "RightArmColor", "LeftLegColor", "RightLegColor"},
     SCALE_PROPS = {"BodyTypeScale", "DepthScale", "HeadScale", "HeightScale", "ProportionScale", "WidthScale"}}
+
 function Avatar.rig()
     local rigs = workspace:FindFirstChild("Rigs")
-    local rig = rigs and rigs:FindFirstChild(LocalPlayer.Name)
-    return rig, rig and rig:FindFirstChildOfClass("Humanoid")
+    if not rigs then return nil end
+    local char = LocalPlayer.Character
+    local tag = char and char:GetAttribute("Tag")
+    if tag ~= nil then
+        if Avatar.rigService == nil then
+            local ok, svc = pcall(function() return require(Core.module("Services", "Asset", "RigService")) end)
+            Avatar.rigService = (ok and type(svc) == "table") and svc or false
+        end
+        if Avatar.rigService then
+            local ok, data = pcall(function() return Avatar.rigService:GetRigFromTag(tag) end)
+            local model = ok and type(data) == "table" and data.Model or nil
+            if model and model.Parent == rigs then return model, model:FindFirstChildOfClass("Humanoid") end
+        end
+    end
+    for _, model in ipairs(rigs:GetChildren()) do
+        if model.Name == LocalPlayer.Name and model:IsA("Model") then
+            local head = model:FindFirstChild("Head")
+            if head and head:IsA("BasePart") and not head.Anchored then return model, model:FindFirstChildOfClass("Humanoid") end
+        end
+    end
+    return nil
 end
--- si ApplyDescription cambio una parte del cuerpo, las uniones de rig.Joints quedan en la parte vieja: se reconectan
--- a la nueva con el mismo nombre (las que van al personaje real no se tocan)
+
 function Avatar.repairJoints(rig)
     local joints = rig and rig:FindFirstChild("Joints")
     if not joints then return end
@@ -2988,6 +2909,29 @@ function Avatar.repairJoints(rig)
                     local replacement = rig:FindFirstChild(part.Name)
                     if replacement and replacement:IsA("BasePart") then joint[key] = replacement end
                 end
+            end
+        elseif joint:IsA("AnimationConstraint") then
+            for _, key in ipairs({"Attachment0", "Attachment1"}) do
+                local attachment = joint[key]
+                local oldPart = attachment and attachment.Parent
+                if attachment and oldPart and not attachment:IsDescendantOf(workspace) then
+                    local replacement = rig:FindFirstChild(oldPart.Name)
+                    if replacement and replacement:IsA("BasePart") then
+                        local newAttachment = replacement:FindFirstChild(attachment.Name)
+                        if not (newAttachment and newAttachment:IsA("Attachment")) then
+                            newAttachment = attachment:Clone()
+                            newAttachment.Parent = replacement
+                        end
+                        joint[key] = newAttachment
+                    end
+                end
+            end
+        end
+    end
+    for _, part in ipairs(rig:GetChildren()) do
+        if part:IsA("BasePart") then
+            for _, child in ipairs(part:GetChildren()) do
+                if (child:IsA("Motor6D") or child:IsA("AnimationConstraint")) and joints:FindFirstChild(child.Name) then pcall(function() child:Destroy() end) end
             end
         end
     end
@@ -3011,7 +2955,7 @@ function Avatar.applySafe(humanoid, description)
         reference = reference or rig:FindFirstChild("LowerTorso") or rig:FindFirstChild("Torso")
         if reference then tempRoot.CFrame = reference.CFrame end
         tempRoot.Parent = rig
-        -- solo ApplyDescription (cambia lo distinto): ApplyDescriptionReset reconstruye todo el cuerpo
+
         local ok, err = pcall(function() humanoid:ApplyDescription(description) end)
         pcall(function() tempRoot:Destroy() end)
         pcall(Avatar.repairJoints, rig)
@@ -3025,7 +2969,7 @@ function Avatar.applySafe(humanoid, description)
     if okDiff then return true end
     return false, tostring(errDiff or errReset)
 end
--- una pieza sola (Korblox): solo ApplyDescription; sin HumanoidRootPart usa la raiz temporal
+
 function Avatar.applyPart(humanoid, description)
     local rig = humanoid and humanoid.Parent
     if rig and not rig:FindFirstChild("HumanoidRootPart") then return Avatar.applySafe(humanoid, description) end
@@ -3034,7 +2978,7 @@ function Avatar.applyPart(humanoid, description)
     if ok then return true end
     return false, tostring(err)
 end
--- saca la ropa y los accesorios que puso el juego (la carpeta Joints no se toca)
+
 function Avatar.strip(rig)
     if not rig then return end
     local joints = rig:FindFirstChild("Joints")
@@ -3062,7 +3006,6 @@ function Avatar.removeHeadItems(rig)
     end
 end
 
--- ---------- guardar el look ----------
 function Avatar.saveFile()
     if type(writefile) ~= "function" then return end
     pcall(function()
@@ -3090,7 +3033,7 @@ function Avatar.remember(desc, strip)
         local ok, v = pcall(function() return desc[p] end)
         if ok and v ~= nil then look.props[p] = v end
     end
-    -- con Korblox puesto se guarda la pierna original (el toggle la vuelve a cambiar)
+
     if Avatar.saved.RightLeg ~= nil then look.props.RightLeg = Avatar.saved.RightLeg end
     for _, p in ipairs(Avatar.COLOR_PROPS) do
         pcall(function()
@@ -3142,7 +3085,6 @@ function Avatar.restoreLook()
     return (Avatar.applySafe(humanoid, desc)) == true
 end
 
--- ---------- piezas: Korblox y Headless ----------
 function Avatar.setKorblox(on)
     local rig, humanoid = Avatar.rig()
     if not (rig and humanoid) then return false end
@@ -3157,15 +3099,15 @@ function Avatar.setKorblox(on)
     end
     return (Avatar.applyPart(humanoid, desc)) == true
 end
--- Headless: la cabeza y la cara del rig se esconden en cada cuadro (Evade vuelve a poner LocalTransparencyModifier = 0).
--- Se busca el rig cada vez, asi sigue andando si Evade arma uno nuevo. Al apagar se devuelve todo.
+
 function Avatar.setHeadless(on)
     local state = Avatar.head
     if on then
         if state.conn then return end
         state.on = true
         state.conn = RunService.RenderStepped:Connect(function()
-            local rig = Avatar.rig()
+            local rig = Avatar.current
+            if not (rig and rig.Parent) then rig = Avatar.rig() end
             local head = rig and rig:FindFirstChild("Head")
             if not head or not head:IsA("BasePart") then return end
             head.LocalTransparencyModifier = 1
@@ -3190,16 +3132,35 @@ function Avatar.setHeadless(on)
     Avatar.head = {on = false, conn = nil, faces = {}}
 end
 
--- vuelve a poner todo lo guardado (al entrar, con un rig nuevo o despues de cambiar de avatar)
 function Avatar.reapply()
-    pcall(Avatar.restoreLook)
+    local rig, humanoid = Avatar.rig()
+    if not (rig and humanoid) then return end
+    if Avatar.look then
+        pcall(Avatar.restoreLook)
+    elseif rig:GetAttribute("HydraLook") ~= nil then
+
+        if not Avatar.ownDesc then
+            local ok, desc = pcall(function() return Players:GetHumanoidDescriptionFromUserId(LocalPlayer.UserId) end)
+            if ok then Avatar.ownDesc = desc end
+        end
+        if Avatar.ownDesc then pcall(Avatar.strip, rig) pcall(Avatar.applySafe, humanoid, Avatar.ownDesc) end
+    end
     Avatar.saved.RightLeg = nil
     if Avatar.korblox then pcall(Avatar.setKorblox, true) end
-    if Avatar.deleted then pcall(Avatar.removeHeadItems, (Avatar.rig())) end
+    if Avatar.deleted then pcall(Avatar.removeHeadItems, rig) end
+    Avatar.mark(rig)
 end
 function Avatar.hasSaved() return Avatar.look ~= nil or Avatar.korblox or Avatar.deleted end
 
--- ---------- acciones de la interfaz ----------
+Avatar.version = 1
+function Avatar.mark(rig)
+    if rig then pcall(function() rig:SetAttribute("HydraLook", Avatar.version) end) end
+end
+function Avatar.bump(rig)
+    Avatar.version = Avatar.version + 1
+    Avatar.mark(rig or (Avatar.rig()))
+end
+
 function Avatar.applyUser(info)
     if Avatar.busy then return false, "Esper\195\161 un momento" end
     local rig, humanoid = Avatar.rig()
@@ -3207,7 +3168,7 @@ function Avatar.applyUser(info)
     Avatar.busy = true
     local okDesc, desc = pcall(function() return Players:GetHumanoidDescriptionFromUserId(info.id) end)
     if not okDesc or not desc then Avatar.busy = false return false, "No se pudo cargar el avatar" end
-    rig, humanoid = Avatar.rig() -- el rig puede haber cambiado mientras cargaba
+    rig, humanoid = Avatar.rig()
     if not (rig and humanoid) then Avatar.busy = false return false, "Entr\195\161 a una partida primero" end
     pcall(Avatar.strip, rig)
     local ok = Avatar.applySafe(humanoid, desc)
@@ -3216,6 +3177,7 @@ function Avatar.applyUser(info)
     Avatar.remember(desc, true)
     if Avatar.korblox then pcall(Avatar.setKorblox, true) end
     if Avatar.deleted then pcall(Avatar.removeHeadItems, rig) end
+    Avatar.bump(rig)
     Avatar.busy = false
     return true, "\226\156\147 Avatar aplicado"
 end
@@ -3226,7 +3188,8 @@ function Avatar.reset()
     Avatar.busy = true
     local okDesc, desc = pcall(function() return Players:GetHumanoidDescriptionFromUserId(LocalPlayer.UserId) end)
     if not okDesc or not desc then Avatar.busy = false return false, "No se pudo cargar tu avatar" end
-    -- se apaga todo y se borra el look guardado (si no, se volveria a poner al reaparecer)
+    Avatar.ownDesc = desc
+
     for _, id in ipairs({"avKorblox", "avHeadless", "avDeleted"}) do
         local option = Hydra.Options[id]
         if option then option:Set(false, true) end
@@ -3240,6 +3203,7 @@ function Avatar.reset()
     if not (rig and humanoid) then Avatar.busy = false return false, "Entr\195\161 a una partida primero" end
     pcall(Avatar.strip, rig)
     local ok = Avatar.applySafe(humanoid, desc)
+    Avatar.bump(rig)
     Avatar.busy = false
     if not ok then return false, "No se pudo restablecer" end
     return true, "\226\156\147 Tu skin original volvi\195\179"
@@ -3276,8 +3240,9 @@ TabExtra:Toggle({Id = "avKorblox", Title = "Pierna Korblox", Desc = "Pierna dere
                 if on then Hydra:Notify(Hydra:T("Se pone cuando entres a una partida")) end
                 return
             end
-            if not on and Avatar.saved.RightLeg == nil then return end
+            if not on and Avatar.saved.RightLeg == nil then Avatar.bump() return end
             pcall(Avatar.setKorblox, on)
+            Avatar.bump()
         end)
     end})
 local HeadlessToggle, DeletedToggle
@@ -3292,24 +3257,27 @@ DeletedToggle = TabExtra:Toggle({Id = "avDeleted", Title = "Headless + Deleted",
         Avatar.deleted = on
         Avatar.setHeadless(on or HeadlessToggle:Get())
         if on then pcall(Avatar.removeHeadItems, (Avatar.rig())) end
+        Avatar.bump()
     end})
 Avatar.korblox, Avatar.deleted = Hydra.Options.avKorblox:Get(), DeletedToggle:Get()
 
--- al entrar: espera tu rig y pone lo guardado; si Evade arma un rig nuevo para vos, lo vuelve a poner
 Avatar.loadFile()
 task.spawn(function()
-    if Avatar.hasSaved() then
-        local waited = 0
-        while waited < 120 and not Avatar.rig() do task.wait(1) waited = waited + 1 end
-        if Avatar.rig() then task.wait(1) pcall(Avatar.reapply) end
-    end
-    local rigs = workspace:WaitForChild("Rigs", 60)
-    if rigs then
-        rigs.ChildAdded:Connect(function(child)
-            if child.Name ~= LocalPlayer.Name or not Avatar.hasSaved() then return end
-            task.wait(2)
-            pcall(Avatar.reapply)
-        end)
+    while true do
+        task.wait(0.5)
+        local rig = Avatar.rig()
+        Avatar.current = rig
+        if rig and not Avatar.busy then
+            local mark = rig:GetAttribute("HydraLook")
+            if mark ~= Avatar.version and (Avatar.hasSaved() or mark ~= nil) then
+                task.wait(0.6)
+                if Avatar.rig() == rig and not Avatar.busy then
+                    Avatar.busy = true
+                    pcall(Avatar.reapply)
+                    Avatar.busy = false
+                end
+            end
+        end
     end
 end)
 
@@ -3330,7 +3298,7 @@ UnlockToggle = TabExtra:Toggle({Id = "unlockAll", Title = "Unlock All", Desc = "
         pcall(UA.Enable)
         Unlock.Waiting = Unlock.Waiting + 1
         local token = Unlock.Waiting
-        -- se activa en segundo plano: espera el resultado (hasta 20 s) y avisa
+
         task.spawn(function()
             local t0 = os.clock()
             while os.clock() - t0 < 20 and token == Unlock.Waiting do
@@ -3342,7 +3310,7 @@ UnlockToggle = TabExtra:Toggle({Id = "unlockAll", Title = "Unlock All", Desc = "
                     if boombox ~= nil then pcall(UA.SetBoombox, boombox) end
                     return
                 end
-                -- si el modulo aviso que aborto o fallo desde que se pidio activar, no se espera mas
+
                 local failed = false
                 for i = logStart + 1, (type(UA.Log) == "table" and #UA.Log or 0) do
                     local line = tostring(UA.Log[i]):gsub("^%[Hydra%-UnlockAll%]%s*", "")
@@ -3356,7 +3324,7 @@ UnlockToggle = TabExtra:Toggle({Id = "unlockAll", Title = "Unlock All", Desc = "
             task.defer(function() UnlockToggle:Set(false, true) end)
         end)
     end})
--- tipos que se desbloquean
+
 for _, kind in ipairs({
     {"Cosmetic", "Cosm\195\169ticos"}, {"Character", "Personajes"}, {"Unusual", "Unusuals"}, {"Perk", "Perks"},
     {"CarryAnimation", "Animaci\195\179n de cargar"}, {"Nametag", "Nametags"}, {"Boombox", "Boombox"},
@@ -3365,7 +3333,7 @@ for _, kind in ipairs({
     UnlockToggle:Toggle({Id = "uaType" .. typeName, Title = kind[2], Default = true,
         Callback = function(on) if UA then pcall(UA.SetType, typeName, on) end end})
 end
--- tambien en partida (Perk, Nametag, Boombox)
+
 for _, kind in ipairs({{"Perk", "Perk en partida"}, {"Nametag", "Nametag en partida"}, {"Boombox", "Boombox en partida"}}) do
     local typeName = kind[1]
     UnlockToggle:Toggle({Id = "uaInGame" .. typeName, Title = kind[2], Desc = "Tambi\195\169n se ve durante la ronda", Default = true,
@@ -3404,7 +3372,7 @@ UnlockToggle:Button({Title = "Cargar mi look", Desc = "El \195\186ltimo que guar
 UnlockToggle:Toggle({Id = "uaAutoLook", Title = "Cargar mi look al activar", Desc = "Se pone solo cada vez que lo prend\195\169s", Default = true,
     Callback = function(on) Unlock.AutoLook = on end})
 Unlock.AutoLook = Hydra.Options.uaAutoLook:Get()
--- los tipos guardados se aplican al modulo al iniciar
+
 if UA then
     for _, typeName in ipairs({"Cosmetic", "Character", "Unusual", "Perk", "CarryAnimation", "Nametag", "Boombox"}) do
         pcall(UA.SetType, typeName, Hydra.Options["uaType" .. typeName]:Get())
@@ -3414,16 +3382,6 @@ if UA then
     end
 end
 
--- ==================== WALL WALK (Extra) ====================
--- Verificado en el codigo de Evade (extraccion 19/10):
---  - Correr por la pared son los estados "WallrunLeft" / "WallrunRight" (Shared.StateInfo). Piden: no estar en el piso,
---    tener una pared al costado hacia donde moves (izquierda/derecha) y RelativeSpeedTest {">", 20} (unos 20 studs/s:
---    corriendo si, caminando no; la prueba es RelativeSpeed >= 20).
---  - Mientras dura, el juego prende una VectorForce "WallrunForce" en el HumanoidRootPart que solo levanta la MITAD
---    del peso (masa x gravedad x 0.5): por eso vas cayendo de a poco hasta despegarte.
--- Wall Walk: mientras estas en la pared, esa fuerza levanta el peso entero y la caida se corta (no bajas). Con
--- "Tambien caminando", el requisito de velocidad baja a 0 y te quedas en la pared aunque camines o te frenes
--- (mientras mantengas apretado el costado hacia la pared). Al apagar se devuelve el 20 original.
 local WallWalk = {Enabled = false, Walking = true, original = nil}
 function WallWalk.states()
     local ok, info = pcall(function() return require(Core.module("Objects", "Game", "Character", "Shared", "StateInfo")) end)
@@ -3435,7 +3393,7 @@ function WallWalk.states()
     end
     return list
 end
--- cambia (o devuelve) la velocidad minima para quedarse en la pared
+
 function WallWalk.speedRule()
     local lower = WallWalk.Enabled and WallWalk.Walking
     for _, state in ipairs(WallWalk.states()) do
@@ -3450,12 +3408,12 @@ Core.steps.wallWalk = function(ctx)
     if not WallWalk.Enabled or not ctx.movement then return end
     local state = ctx.movement.State
     if state ~= "WallrunLeft" and state ~= "WallrunRight" then return end
-    -- fuerza del juego: el peso entero en vez de la mitad
+
     pcall(function()
         local force = ctx.movement.Constraints.Constraints.WallrunForce
         force.Force = Vector3.new(0, ctx.root:GetMass() * workspace.Gravity, 0)
     end)
-    -- y se corta la caida que ya traias
+
     local v = ctx.root.AssemblyLinearVelocity
     if v.Y < 0 then ctx.root.AssemblyLinearVelocity = Vector3.new(v.X, 0, v.Z) end
 end
@@ -3483,3 +3441,81 @@ WallToggle:Toggle({Id = "wallWalkSlow", Title = "Tambi\195\169n caminando", Desc
         WallWalk.speedRule()
     end})
 WallWalk.Walking = Hydra.Options.wallWalkSlow:Get()
+
+local Cam = {On = false, Extra = 12, Height = 1.5, Fov = false, FovValue = 90, Cur = 0, Conn = nil, CS = nil, rays = RaycastParams.new()}
+Cam.rays.FilterType = Enum.RaycastFilterType.Exclude
+pcall(function() Cam.CS = require(Core.module("Services", "Client", "CameraService")) end)
+function Cam.step(dt)
+    local cs = Cam.CS
+    local want = Cam.On and Cam.Extra or 0
+    if want > 0 then
+        local base = cs.CameraCFrame
+        if typeof(base) == "CFrame" then
+            local ignore = {}
+            if LocalPlayer.Character then ignore[#ignore + 1] = LocalPlayer.Character end
+            for _, name in ipairs({"Players", "Rigs"}) do
+                local folder = workspace:FindFirstChild(name)
+                if folder then ignore[#ignore + 1] = folder end
+            end
+            Cam.rays.FilterDescendantsInstances = ignore
+            local back = base:VectorToWorldSpace(Vector3.new(0, Cam.Height * (want / 20), want))
+            local hit = workspace:Raycast(base.Position, back + back.Unit * 0.8, Cam.rays)
+            if hit then want = math.max(0, want * ((hit.Distance - 0.8) / (back.Magnitude + 0.8))) end
+        end
+    end
+
+    Cam.Cur = Cam.Cur + (want - Cam.Cur) * math.min(1, dt * 10)
+    if Cam.Cur < 0.01 and not Cam.On then
+        cs:SetCameraOffset("HydraDistance", nil)
+    else
+        cs:SetCameraOffset("HydraDistance", CFrame.new(0, Cam.Height * (Cam.Cur / 20), Cam.Cur))
+    end
+    if Cam.Fov then
+        local baseFov = tonumber(cs.BaseFOV) or 70
+        cs:AdjustFOV("HydraFov", math.clamp(Cam.FovValue / math.max(baseFov, 1), 0.3, 3))
+    else
+        cs:AdjustFOV("HydraFov", nil)
+    end
+end
+
+function Cam.loop()
+    if Cam.Conn or not Cam.CS then return end
+    Cam.Conn = RunService.RenderStepped:Connect(function(dt)
+        local ok = pcall(Cam.step, dt)
+        if (not ok) or (not Cam.On and not Cam.Fov and Cam.Cur < 0.01) then
+            pcall(function()
+                Cam.CS:SetCameraOffset("HydraDistance", nil)
+                Cam.CS:AdjustFOV("HydraFov", nil)
+            end)
+            if Cam.Conn then Cam.Conn:Disconnect() Cam.Conn = nil end
+        end
+    end)
+end
+
+Hydra:AddTranslations({
+    ["C\195\161mara"] = "Camera", ["C\195\161mara lejana"] = "Far camera", ["Aleja la c\195\161mara de tu personaje"] = "Moves the camera away from your character",
+    ["Distancia"] = "Range", ["Cu\195\161nto se aleja"] = "How far it goes",
+    ["Campo de visi\195\179n"] = "Field of view", ["M\195\161s o menos \195\161ngulo de visi\195\179n"] = "Wider or narrower view", ["Grados"] = "Degrees",
+})
+TabExtra:Section("C\195\161mara", "C")
+local function cameraToggle(o)
+    local toggle
+    toggle = TabExtra:Toggle({Id = o.Id, Title = o.Title, Desc = o.Desc, Icon = "C", Keybind = true, Floating = true,
+        Callback = function(on)
+            if on and not Cam.CS then
+                Hydra:Notify(Hydra:T(o.Title) .. ": " .. Hydra:T("No disponible en este ejecutor"))
+                task.defer(function() toggle:Set(false, true) end)
+                return
+            end
+            o.set(on)
+            Cam.loop()
+        end})
+    return toggle
+end
+local FarToggle = cameraToggle({Id = "camFar", Title = "C\195\161mara lejana", Desc = "Aleja la c\195\161mara de tu personaje", set = function(on) Cam.On = on end})
+FarToggle:Slider({Id = "camDistance", Title = "Distancia", Desc = "Cu\195\161nto se aleja", Min = 0, Max = 40, Step = 1, Default = 12, Suffix = " m",
+    Callback = function(v) Cam.Extra = math.clamp(tonumber(v) or 0, 0, 40) end})
+local FovToggle = cameraToggle({Id = "camFov", Title = "FOV", Desc = "M\195\161s o menos \195\161ngulo de visi\195\179n", set = function(on) Cam.Fov = on end})
+FovToggle:Slider({Id = "camFovValue", Title = "Campo de visi\195\179n", Desc = "Grados", Min = 50, Max = 120, Step = 1, Default = 90, Suffix = "\194\176",
+    Callback = function(v) Cam.FovValue = math.clamp(tonumber(v) or 90, 50, 120) end})
+Cam.Extra, Cam.FovValue = Hydra.Options.camDistance:Get(), Hydra.Options.camFovValue:Get()
