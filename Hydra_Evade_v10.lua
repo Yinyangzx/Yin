@@ -1,3415 +1,2083 @@
--- HYDRA - Evade (usa la libreria de forma externa)
--- La libreria (Hydra_Lib.lua) se carga desde GitHub
-local HYDRA_URL = "https://raw.githubusercontent.com/ZINZEROX/Ni/refs/heads/main/UIV2"
+--[[
+    HYDRA - interfaz
 
-local Hydra = loadstring(game:HttpGet(HYDRA_URL))()
+    VENTANA
+    - Arrastra la ventana desde la cabecera. Las pestanas de abajo son un carrusel: arrastralo de costado o toca una pestana.
+    - "-" esconde la ventana y deja un boton flotante; tocalo para volver a abrirla. En PC tambien con la tecla K.
+    - "" cierra el script.
+
+    IDIOMA
+    Detecta el idioma del jugador (primero el del dispositivo, despues el que eligio en Roblox). Espanol e ingles completos;
+    otros idiomas usan el traductor de Roblox. Se puede forzar en AJUSTES -> Idioma.
+
+    COMPONENTES (para armar las pestanas de Hydra en la seccion "pestanas y opciones")
+    createTab, section, toggle, slider, actionButton, dropdown, infoCard, note, toast.
+]]
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer = Players.LocalPlayer
 
--- ==================== NUCLEO: acceso al movimiento de Evade ====================
--- Verificado en el codigo actual de Evade (extraccion 19/10):
---  - ReplicatedStorage.Objects.Game.Character.Client.Movement: el juego llama Movement:Update(dt) cada cuadro
---    (Character.lua), con self.DataRegistry ("Grounded", "Velocity" en unidades x90), self.JumpHeldDown y self:AttemptJump().
---  - CharacterService:GetCharacterFromPlayer(jugador).Movement.MoveStats: Modifiers + Reset() es lo mismo que hace
---    el evento ModifyMovement del juego. JumpCap = 1 en BaseStats (0 saltos en el aire); cada punto extra = 1 salto mas.
--- En Solara require() crea copias de los modulos: ahi se usa un modo sin require (Stepped) para Speed Front
--- y firesignal (si existe) para Jump Layers.
-local Core = {steps = {}, preSteps = {}, hooked = false, safeMode = false}
-pcall(function()
-    if identifyexecutor then
-        Core.safeMode = string.find(string.lower(tostring(identifyexecutor())), "solara", 1, true) ~= nil
-    end
-end)
-
-function Core.module(...)
-    local node = ReplicatedStorage
-    for _, name in ipairs({...}) do
-        node = node and node:FindFirstChild(name)
-    end
-    return node
-end
-
--- engancha Movement.Update una sola vez; cada funcion de Core.steps corre despues del Update del juego
-function Core.hook()
-    if Core.hooked then return true end
-    if Core.safeMode then
-        RunService.Stepped:Connect(function(_, dt)
-            local char = LocalPlayer.Character
-            local hrp = char and char:FindFirstChild("HumanoidRootPart")
-            local hum = char and char:FindFirstChildOfClass("Humanoid")
-            if not hrp or not hum or hum.Health <= 0 then return end
-            local ctx = {char = char, root = hrp, hum = hum, dt = dt, grounded = hum.FloorMaterial ~= Enum.Material.Air,
-                jumpHeld = hum.Jump == true, jump = function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end}
-            for _, fn in pairs(Core.steps) do pcall(fn, ctx) end
-        end)
-        Core.hooked = true
-        return true
-    end
-    local moduleScript = Core.module("Objects", "Game", "Character", "Client", "Movement")
-    if not moduleScript then return false end
-    local ok, Movement = pcall(require, moduleScript)
-    if not ok or type(Movement) ~= "table" or type(Movement.Update) ~= "function" then return false end
-    local old = Movement.Update
-    Movement.Update = function(self, dt, ...)
-        -- pasos que corren ANTES del juego (por ejemplo, devolver la friccion al soltar el slide)
-        if self.Character and self.Character == LocalPlayer.Character then
-            for _, fn in pairs(Core.preSteps) do pcall(fn, self) end
-        end
-        old(self, dt, ...)
-        if not (self.Character and self.Character == LocalPlayer.Character) then return end
-        local hrp = self.Character:FindFirstChild("HumanoidRootPart")
-        local hum = self.Character:FindFirstChildOfClass("Humanoid")
-        if not hrp or not hum or hum.Health <= 0 then return end
-        local okG, g = pcall(function() return self.DataRegistry:Get("Grounded") end)
-        local ctx = {char = self.Character, root = hrp, hum = hum, dt = tonumber(dt) or (1 / 60), registry = self.DataRegistry,
-            grounded = (okG and g ~= nil) and (g == true) or (not (okG and g ~= nil) and hum.FloorMaterial ~= Enum.Material.Air),
-            jumpHeld = self.JumpHeldDown == true, movement = self, jump = function() pcall(function() self:AttemptJump() end) end}
-        for _, fn in pairs(Core.steps) do pcall(fn, ctx) end
-    end
-    Core.hooked = true
-    return true
-end
-
--- cambia un valor de movimiento del personaje (como el evento ModifyMovement del juego); nil = vuelve al normal
-function Core.setModifier(name, value)
-    if not Core.safeMode then
-        local ok = pcall(function()
-            local service = require(Core.module("Services", "Asset", "CharacterService"))
-            local data = service:GetCharacterFromPlayer(LocalPlayer)
-            local stats = data.Movement.MoveStats
-            stats.Modifiers = stats.Modifiers or {}
-            stats.Modifiers[name] = value
-            stats:Reset()
-        end)
-        if ok then return true end
-    end
-    local fire = firesignal
-    local char = LocalPlayer.Character
-    local tag = char and char:GetAttribute("Tag")
-    local event = Core.module("Events", "CharacterTask")
-    if type(fire) ~= "function" or not tag or not event then return false end
-    return (pcall(fire, event.OnClientEvent, tag, "ModifyMovement", {name, value}))
-end
-
--- ==================== SPEED ====================
--- Velocidad del personaje en studs/s (la velocidad tope corriendo). Evade de fabrica: Speed 1500 y SprintCap 2 en
--- BaseStats (verificado) = 1500 x 2 / 90 = 33 studs/s. Se cambia "Speed" con un Modifier (lo mismo que hace el evento
--- ModifyMovement del juego), asi que siguen andando el arranque del sprint, agacharse, emotes y perks.
-local SP = {Enabled = false, Value = 55, Token = 0, SPRINT_CAP = 2}
-function SP.apply()
-    if SP.Enabled then return Core.setModifier("Speed", SP.Value * 90 / SP.SPRINT_CAP) end
-    return Core.setModifier("Speed", nil)
-end
-LocalPlayer.CharacterAdded:Connect(function()
-    SP.Token = SP.Token + 1
-    local token = SP.Token
-    if not SP.Enabled then return end
-    task.spawn(function()
-        for _ = 1, 20 do
-            task.wait(0.5)
-            if token ~= SP.Token or not SP.Enabled then return end
-            if SP.apply() then return end
-        end
-    end)
-end)
-
--- ==================== ADJUST JUMP ====================
--- Altura del salto en studs: "JumpHeight" de MoveStats (BaseStats = 3, verificado). Movement:Jump hace
--- Humanoid.JumpHeight = JumpHeight de las stats, asi que con un Modifier vale para todos los saltos (tambien los del aire).
-local AJ = {Enabled = false, Height = 10, Token = 0}
-function AJ.apply()
-    if AJ.Enabled then return Core.setModifier("JumpHeight", AJ.Height) end
-    return Core.setModifier("JumpHeight", nil)
-end
-LocalPlayer.CharacterAdded:Connect(function()
-    AJ.Token = AJ.Token + 1
-    local token = AJ.Token
-    if not AJ.Enabled then return end
-    task.spawn(function()
-        for _ = 1, 20 do
-            task.wait(0.5)
-            if token ~= AJ.Token or not AJ.Enabled then return end
-            if AJ.apply() then return end
-        end
-    end)
-end)
-
--- ==================== SPEED FRONT / BACK FRONT ====================
--- Movimiento de Dara Trimp (velocidad horizontal hacia donde miras, con aceleracion suave) + lo de Trimp x Frontal
--- para no trabarse: un rayo a la altura de la rodilla ve rampas y obstaculos. En el piso salta solo; en el aire los usa
--- de rampa. Multiplicador de rampa ajustable (sube con fuerza x multiplicador y gana velocidad por un momento).
--- Back Front es lo mismo pero hacia atras de la camara (sign = -1). Las dos no pueden estar prendidas a la vez.
-local Front = {rays = RaycastParams.new()}
-Front.rays.FilterType = Enum.RaycastFilterType.Exclude
-pcall(function() Front.rays.RespectCanCollide = true end)
-
--- rampa u obstaculo en la direccion de avance (ignora jugadores, bots, piso plano, pendientes suaves y paredes de costado)
-function Front.obstacle(char, root, dir, speed)
-    local ignore = {char}
-    for _, name in ipairs({"Players", "Rigs"}) do
-        local folder = workspace:FindFirstChild(name)
-        if folder then ignore[#ignore + 1] = folder end
-    end
-    Front.rays.FilterDescendantsInstances = ignore
-    local dist = math.clamp(speed * 0.15, 5, 12)
-    local hit = workspace:Raycast(root.Position - Vector3.new(0, 1.5, 0), dir * dist, Front.rays)
-    if not hit or hit.Normal.Y > 0.9 then return nil end
-    local isRamp = hit.Normal.Y >= 0.2
-    if not isRamp then
-        local n = Vector3.new(hit.Normal.X, 0, hit.Normal.Z)
-        if n.Magnitude > 0.05 and dir:Dot(-n.Unit) < 0.3 then return nil end
-    end
-    return hit, isRamp
-end
-
-function Front.lift(root, vy)
-    local v = root.AssemblyLinearVelocity
-    if v.Y < vy then root.AssemblyLinearVelocity = Vector3.new(v.X, vy, v.Z) end
-end
-
-function Front.new(sign)
-    local F = {
-        Enabled = false, Sign = sign, MaxSpeed = 99, Accel = 9, Smooth = true, FollowMove = false,
-        RampPower = 42, RampMult = 1.55, RampSpeedBoost = true,
-        Speed = 0, Dir = Vector3.new(1, 0, 0), Seen = 0, LastAuto = 0, LastAir = 0, BoostUntil = 0,
-    }
-    function F.wantedDir(hum)
-        if F.FollowMove then
-            local md = hum.MoveDirection
-            return md.Magnitude > 0.05 and Vector3.new(md.X, 0, md.Z).Unit or nil
-        end
-        local cam = workspace.CurrentCamera
-        if not cam then return nil end
-        local look = cam.CFrame.LookVector * F.Sign
-        local flat = Vector3.new(look.X, 0, look.Z)
-        return flat.Magnitude > 0.05 and flat.Unit or nil
-    end
-    function F.step(ctx)
-        if not F.Enabled then F.Speed = 0 return end
-        local dir = F.wantedDir(ctx.hum)
-        local moving = dir ~= nil and (not F.FollowMove or ctx.hum.MoveDirection.Magnitude > 0.05)
-        if dir then F.Dir = dir end
-        local now = os.clock()
-        local target = moving and F.MaxSpeed or 0
-        -- despues de una rampa, un empujon de velocidad que se va apagando (multiplicador de rampa)
-        if F.RampSpeedBoost and now < F.BoostUntil and moving then
-            local left = (F.BoostUntil - now) / 0.8
-            target = target * (1 + (F.RampMult - 1) * 0.5 * left)
-        end
-        if F.Smooth then
-            local rate = target > F.Speed and F.Accel or F.Accel * 0.6
-            F.Speed = F.Speed + (target - F.Speed) * math.min(rate * ctx.dt, 1)
-        else
-            F.Speed = target
-        end
-        local vel = F.Dir * F.Speed
-        if ctx.registry then pcall(function() ctx.registry:Set("Velocity", vel * 90) end) end
-        local cur = ctx.root.AssemblyLinearVelocity
-        ctx.root.AssemblyLinearVelocity = Vector3.new(vel.X, cur.Y, vel.Z)
-
-        if not moving or F.Speed <= 3 then F.Seen = 0 return end
-        local hit, isRamp = Front.obstacle(ctx.char, ctx.root, F.Dir, F.Speed)
-        F.Seen = hit and F.Seen + 1 or 0 -- tiene que verse 2 cuadros seguidos
-        if F.Seen < 2 then return end
-        local lift = F.RampPower * F.RampMult * 0.8
-        if ctx.grounded and now - F.LastAuto > 0.45 then
-            F.LastAuto = now
-            if isRamp then F.BoostUntil = now + 0.8 end
-            ctx.jump()
-            local root = ctx.root
-            task.delay(0.1, function() if root.Parent then Front.lift(root, lift) end end)
-        elseif not ctx.grounded and now - F.LastAir > 0.3 then
-            F.LastAir = now
-            Front.lift(ctx.root, lift * 0.6)
-        end
-    end
-    return F
-end
-
-local SF = Front.new(1)
-local BF = Front.new(-1)
-Core.steps.speedFront = SF.step
-Core.steps.backFront = BF.step
-
--- ==================== SPEED WITH JUMP ====================
--- Salta solo como un conejo y en el aire seguis caminando normal: Evade no deja acelerar hacia adelante en el aire
--- (Functions.Air anula el "adelante" de MoveDirection, verificado en el codigo del juego), asi que en el aire se
--- pone la velocidad hacia donde caminas con la misma rapidez que traias en el piso (x el multiplicador).
-local SWJ = {Enabled = false, Power = 34, Delay = 0, AirMult = 1, OnlyMoving = true, GroundSpeed = 0, Last = 0}
-Core.steps.speedWithJump = function(ctx)
-    if not SWJ.Enabled then return end
-    local md = ctx.hum.MoveDirection
-    local moving = md.Magnitude > 0.05
-    local now = os.clock()
-    local flat = Vector3.new(ctx.root.AssemblyLinearVelocity.X, 0, ctx.root.AssemblyLinearVelocity.Z)
-    if ctx.grounded then
-        if moving then SWJ.GroundSpeed = flat.Magnitude end
-        if (moving or not SWJ.OnlyMoving) and now - SWJ.Last >= SWJ.Delay + 0.15 then
-            SWJ.Last = now
-            ctx.jump()
-            local root = ctx.root
-            task.delay(0.05, function() if root.Parent then Front.lift(root, SWJ.Power) end end)
-        end
-    elseif moving and not SF.Enabled and not BF.Enabled and SWJ.GroundSpeed > 1 then
-        local vel = Vector3.new(md.X, 0, md.Z).Unit * SWJ.GroundSpeed * SWJ.AirMult
-        if ctx.registry then pcall(function() ctx.registry:Set("Velocity", vel * 90) end) end
-        ctx.root.AssemblyLinearVelocity = Vector3.new(vel.X, ctx.root.AssemblyLinearVelocity.Y, vel.Z)
-    end
-end
-
--- ==================== INFINITE SLIDE ====================
--- Misma logica de Yin Yang (Dara): mientras estas en Slide y mantenes agacharte, la friccion del slide pasa a ser
--- negativa (-Velocidad): el slide no frena y acelera. Estados verificados en StateInfo: Slide, EmotingSlide, CarrySlide.
--- Arreglos de Yin Yang (v53/v54): al soltar agacharte la friccion vuelve a 5 ANTES de que el juego calcule (si no, te
--- manda volando) y durante 0,4 s se limita la velocidad al tope de correr y el "salto" hacia arriba al pararte.
-local IS = {Enabled = false, Boost = 8, Applied = nil, ExitUntil = 0, Cap = 3000, Jumped = false,
-    SLIDES = {Slide = true, EmotingSlide = true, CarrySlide = true}}
-function IS.crouchHeld(movement)
-    local ok, held = pcall(function() return movement.DataRegistry:Get("CrouchKey") end)
-    return ok and held == true
-end
-function IS.setFriction(movement, value)
-    if IS.Applied == value then return end
-    IS.Applied = value
-    pcall(function()
-        local stats = movement.MoveStats
-        stats.Modifiers = stats.Modifiers or {}
-        stats.Modifiers.Friction = value
-        stats:Reset()
-    end)
-end
-function IS.exitGuard(movement)
-    local cap = IS.Cap
-    local v = movement.DataRegistry:Get("Velocity")
-    if typeof(v) == "Vector3" and v.Magnitude > cap then movement.DataRegistry:Set("Velocity", v.Unit * cap) end
-    local root = movement.Character and movement.Character:FindFirstChild("HumanoidRootPart")
-    if not root then return end
-    local av = root.AssemblyLinearVelocity
-    local flat = Vector3.new(av.X, 0, av.Z)
-    local vy = av.Y
-    if movement.JumpHeldDown == true then IS.Jumped = true end
-    if not IS.Jumped and vy > 4 then vy = 0 end
-    if flat.Magnitude > cap / 90 then flat = flat.Unit * (cap / 90) end
-    root.AssemblyLinearVelocity = Vector3.new(flat.X, vy, flat.Z)
-end
--- antes del juego: si soltaste agacharte con la friccion negativa puesta, vuelve a la normal en el acto
-Core.preSteps.infiniteSlide = function(movement)
-    if os.clock() < IS.ExitUntil then pcall(IS.exitGuard, movement) end
-    if IS.Applied == nil or IS.crouchHeld(movement) then return end
-    IS.setFriction(movement, nil)
-    pcall(function()
-        local stats = movement.MoveStats.MoveStats
-        IS.Cap = (tonumber(stats.Speed) or 1500) * (tonumber(stats.SprintCap) or 2)
-    end)
-    IS.Jumped = movement.JumpHeldDown == true
-    IS.ExitUntil = os.clock() + 0.4
-    pcall(IS.exitGuard, movement)
-end
--- despues del juego: en slide y agachado = friccion negativa
-Core.steps.infiniteSlide = function(ctx)
-    local movement = ctx.movement
-    if not movement then return end
-    local sliding = IS.Enabled and IS.SLIDES[movement.State] == true and IS.crouchHeld(movement)
-    IS.setFriction(movement, sliding and -IS.Boost or nil)
-end
-
--- ==================== AUTO CROUCH ====================
--- Se agacha y se levanta solo, las veces por segundo que elijas. Usa la misma entrada que la tecla de agacharse del
--- juego (Movement:KeyUsed con Key = "Crouching" pone "CrouchKey", verificado en el codigo): anda en PC y celular.
-local AC = {Enabled = false, Rate = 1.5, Down = false, Next = 0, Movement = nil}
-Core.steps.autoCrouch = function(ctx)
-    if not AC.Enabled or not ctx.movement then return end
-    AC.Movement = ctx.movement
-    local now = os.clock()
-    if now < AC.Next then return end
-    AC.Next = now + 1 / math.max(AC.Rate, 0.5)
-    AC.Down = not AC.Down
-    pcall(function() ctx.movement:KeyUsed({Key = "Crouching", Down = AC.Down}) end)
-end
-function AC.release()
-    if AC.Down and AC.Movement then pcall(function() AC.Movement:KeyUsed({Key = "Crouching", Down = false}) end) end
-    AC.Down = false
-end
-
--- ==================== JUMP LAYERS ====================
--- Saltos en el aire: JumpCap del juego. Capas = saltos extra en el aire (1 a 50) -> JumpCap = capas + 1.
-local JL = {Enabled = false, Layers = 3, Token = 0}
-function JL.apply()
-    if JL.Enabled then return Core.setModifier("JumpCap", JL.Layers + 1) end
-    return Core.setModifier("JumpCap", nil)
-end
--- despues de morir el personaje nuevo tarda en armarse: reintenta unos segundos
-LocalPlayer.CharacterAdded:Connect(function()
-    JL.Token = JL.Token + 1
-    local token = JL.Token
-    if not JL.Enabled then return end
-    task.spawn(function()
-        for _ = 1, 20 do
-            task.wait(0.5)
-            if token ~= JL.Token or not JL.Enabled then return end
-            if JL.apply() then return end
-        end
-    end)
-end)
-
--- ==================== COLORES DE HYDRA (siempre activos, sin opcion) ====================
--- Verificado en el codigo de Evade:
---  - Derribados fuera de la pantalla: Fear/Notices/NoticeCreator pinta cada cuadro Notice.Skull y Notice.Arrow.ImageLabel
---    con rojo (255,102,102) que se oscurece hacia (20,8,8) segun el tiempo que le queda al derribado. Viven en
---    PlayerGui.Game.HUD.Notices. Aca pasan a blanco, conservando el oscurecimiento (asi se sigue viendo cuanto le queda).
---  - Vida: CharacterStatus.SetHealth pinta HealthIcon, el texto Health y BackgroundStroke.UIStroke de verde (rojo con poca
---    vida) en PlayerGui.Game.HUD.Overlay.CharacterStatus.BottomLeft.Health. Aca quedan siempre en blanco.
--- No se toca ningun modulo del juego: cada vez que el juego cambia el color, se vuelve a poner el nuestro al instante.
-local Paint = {WHITE = Color3.new(1, 1, 1), DARK = Color3.fromRGB(28, 28, 32), last = setmetatable({}, {__mode = "k"})}
-
--- mantiene inst[prop] con el color que devuelve convert(color que puso el juego)
-function Paint.lock(inst, prop, convert)
-    if not inst then return end
-    local function apply()
-        local current = inst[prop]
-        if Paint.last[inst] == current then return end
-        local wanted = convert(current)
-        Paint.last[inst] = wanted
-        if current ~= wanted then inst[prop] = wanted end
-    end
-    inst:GetPropertyChangedSignal(prop):Connect(apply)
-    apply()
-end
-
-function Paint.white() return Paint.WHITE end
--- rojo del juego -> blanco con el mismo oscurecimiento (R va de 255 a 20 mientras se le acaba el tiempo)
-function Paint.downed(color)
-    local t = math.clamp((1 - color.R) / (1 - 20 / 255), 0, 1)
-    return Paint.WHITE:Lerp(Paint.DARK, t)
-end
-
-function Paint.notice(frame)
-    local skull = frame:FindFirstChild("Skull")
-    local arrow = frame:FindFirstChild("Arrow")
-    local arrowImage = arrow and arrow:FindFirstChild("ImageLabel")
-    if skull and skull:IsA("ImageLabel") then Paint.lock(skull, "ImageColor3", Paint.downed) end
-    if arrowImage and arrowImage:IsA("ImageLabel") then Paint.lock(arrowImage, "ImageColor3", Paint.downed) end
-end
-
--- Reloj de la ronda (RoundState, verificado): el juego muestra Overlay.RoundOverlay.RoundTimer.RoundTimer solo en el
--- intermedio (RoundStatus 1) y lo esconde al empezar la ronda (2); en la ronda escribe el tiempo en IngameRoundTimer.Timer.
--- Aca el reloj grande queda siempre visible, copia el tiempo de la ronda, todo en blanco y con efectos: brillo que
--- cruza los numeros, luz que recorre el borde y un pulso en cada segundo (mas fuerte en los ultimos 10).
-Paint.spin = {}
-RunService.Heartbeat:Connect(function(dt)
-    for gradient in pairs(Paint.spin) do
-        if gradient.Parent then
-            gradient.Rotation = (gradient.Rotation + dt * 45) % 360
-        else
-            Paint.spin[gradient] = nil
-        end
-    end
-end)
-
-function Paint.shine(label)
-    if not label then return end
-    local gradient = label:FindFirstChildOfClass("UIGradient") or Instance.new("UIGradient")
-    gradient.Color = ColorSequence.new(Paint.WHITE)
-    gradient.Transparency = NumberSequence.new({
-        NumberSequenceKeypoint.new(0, 0.3), NumberSequenceKeypoint.new(0.5, 0), NumberSequenceKeypoint.new(1, 0.3),
-    })
-    gradient.Rotation = 0
-    gradient.Offset = Vector2.new(-1, 0)
-    gradient.Parent = label
-    game:GetService("TweenService"):Create(gradient, TweenInfo.new(2.2, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, false, 1), {Offset = Vector2.new(1, 0)}):Play()
-end
-
-function Paint.roundTimer(container)
-    local box = container:WaitForChild("RoundTimer", 15)
-    if not box then return end
-    local timer = box:FindFirstChild("Timer")
-    local about = box:FindFirstChild("About")
-    local stroke = box:FindFirstChildOfClass("UIStroke")
-    -- siempre visible (tambien el contenedor)
-    Paint.lock(container, "Visible", function() return true end)
-    Paint.lock(box, "Visible", function() return true end)
-    -- blanco
-    Paint.lock(timer, "TextColor3", Paint.white)
-    Paint.lock(about, "TextColor3", Paint.white)
-    Paint.lock(box:FindFirstChild("ImageLabel"), "ImageColor3", Paint.white)
-    Paint.lock(stroke, "Color", Paint.white)
-    -- efectos
-    Paint.shine(timer)
-    Paint.shine(about)
-    if stroke then
-        local light = stroke:FindFirstChildOfClass("UIGradient") or Instance.new("UIGradient")
-        light.Color = ColorSequence.new({
-            ColorSequenceKeypoint.new(0, Color3.fromRGB(70, 74, 86)), ColorSequenceKeypoint.new(0.45, Paint.WHITE),
-            ColorSequenceKeypoint.new(0.55, Paint.WHITE), ColorSequenceKeypoint.new(1, Color3.fromRGB(70, 74, 86)),
-        })
-        light.Transparency = NumberSequence.new(0)
-        light.Rotation = 0
-        light.Parent = stroke
-        Paint.spin[light] = true
-    end
-    if timer then
-        local pulse = timer:FindFirstChild("HydraPulse") or Instance.new("UIScale")
-        pulse.Name = "HydraPulse"
-        pulse.Parent = timer
-        local tweens = game:GetService("TweenService")
-        timer:GetPropertyChangedSignal("Text"):Connect(function()
-            local seconds = tonumber(string.match(timer.Text, ":(%d+)$"))
-            local minutes = tonumber(string.match(timer.Text, "^(%d+):"))
-            local last = minutes == 0 and seconds and seconds <= 10
-            pulse.Scale = last and 1.18 or 1.07
-            tweens:Create(pulse, TweenInfo.new(last and 0.45 or 0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {Scale = 1}):Play()
-        end)
-    end
-    -- en la ronda el juego escribe el tiempo en el reloj chico: se copia al grande y el chico se esconde
-    local ingame = container:FindFirstChild("IngameRoundTimer")
-    local ingameTimer = ingame and ingame:FindFirstChild("Timer")
-    if ingameTimer and timer then
-        Paint.lock(ingame, "Visible", function() return false end)
-        ingameTimer:GetPropertyChangedSignal("Text"):Connect(function()
-            if timer.Text ~= ingameTimer.Text then timer.Text = ingameTimer.Text end
-        end)
-    end
-end
-
-function Paint.hookGame(gameGui)
-    task.spawn(function()
-        local hud = gameGui:WaitForChild("HUD", 15)
-        if not hud then return end
-        local notices = hud:WaitForChild("Notices", 15)
-        if notices then
-            for _, child in ipairs(notices:GetChildren()) do Paint.notice(child) end
-            notices.ChildAdded:Connect(function(child) task.defer(Paint.notice, child) end)
-        end
-        local ok, health = pcall(function()
-            return hud:WaitForChild("Overlay", 15):WaitForChild("CharacterStatus", 15):WaitForChild("BottomLeft", 15):WaitForChild("Health", 15)
-        end)
-        if ok and health then
-            Paint.lock(health:FindFirstChild("HealthIcon"), "ImageColor3", Paint.white)
-            Paint.lock(health:FindFirstChild("Health"), "TextColor3", Paint.white)
-            local background = health:FindFirstChild("BackgroundStroke")
-            Paint.lock(background and background:FindFirstChildOfClass("UIStroke"), "Color", Paint.white)
-        end
-        local okRound, roundTimer = pcall(function()
-            return hud:WaitForChild("Overlay", 15):WaitForChild("RoundOverlay", 15):WaitForChild("RoundTimer", 15)
-        end)
-        if okRound and roundTimer then Paint.roundTimer(roundTimer) end
-    end)
-end
-
-do
-    local playerGui = LocalPlayer:WaitForChild("PlayerGui")
-    local current = playerGui:FindFirstChild("Game")
-    if current then Paint.hookGame(current) end
-    -- si el juego vuelve a crear su interfaz (respawn), se engancha a la nueva
-    playerGui.ChildAdded:Connect(function(child)
-        if child.Name == "Game" and child:IsA("ScreenGui") then Paint.hookGame(child) end
-    end)
-end
-
--- ==================== PESTANA MOVIMIENTO ====================
-Hydra:AddTranslations({
-    ["Movimiento"] = "Movement", ["MOVER"] = "MOVE", ["Velocidad"] = "Speed", ["Salto"] = "Jump",
-    ["Te lleva hacia adelante sin trabarse"] = "Takes you forward without getting stuck",
-    ["Velocidad m\195\161xima"] = "Max speed", ["Hasta qu\195\169 velocidad llega"] = "How fast it gets",
-    ["Aceleraci\195\179n"] = "Acceleration", ["Qu\195\169 tan r\195\161pido llega a la velocidad"] = "How fast it reaches the speed",
-    ["Multiplicador de rampa"] = "Ramp multiplier", ["Cu\195\161nto te impulsa una rampa"] = "How hard a ramp launches you",
-    ["Fuerza de rampa"] = "Ramp power", ["Fuerza base del salto en rampas"] = "Base jump power on ramps",
-    ["Acelerar en rampas"] = "Speed up on ramps", ["Gana velocidad un momento al pasar una rampa"] = "Gains speed for a moment after a ramp",
-    ["Suave"] = "Smooth", ["Acelera y frena de a poco"] = "Speeds up and slows down gradually",
-    ["Seguir movimiento"] = "Follow movement", ["Va hacia donde camin\195\161s, no hacia la c\195\161mara"] = "Goes where you walk, not where the camera looks",
-    ["Saltos extra en el aire"] = "Extra jumps in the air",
-    ["Capas"] = "Layers", ["Cu\195\161ntas veces pod\195\169s saltar en el aire"] = "How many times you can jump in the air",
-    ["No disponible en este ejecutor"] = "Not available on this executor",
-    ["Te lleva hacia atr\195\161s sin trabarse"] = "Takes you backwards without getting stuck",
-    ["Va hacia donde camin\195\161s, no hacia atr\195\161s de la c\195\161mara"] = "Goes where you walk, not behind the camera",
-    ["Salta solo y segu\195\173s caminando normal en el aire"] = "Jumps by itself and you keep walking normally in the air",
-    ["Fuerza de salto"] = "Jump power", ["Qu\195\169 tan alto salta"] = "How high it jumps",
-    ["Espera entre saltos"] = "Delay between jumps", ["Pausa al tocar el piso"] = "Pause when touching the ground",
-    ["Velocidad en el aire"] = "Air speed", ["1x = la misma que al caminar"] = "1x = the same as walking",
-    ["Solo al caminar"] = "Only while walking", ["Si no te mov\195\169s, no salta"] = "If you don't move, it doesn't jump",
-    ["Se agacha y se levanta solo"] = "Crouches and stands up by itself",
-    ["Cambia qu\195\169 tan r\195\161pido corr\195\169s"] = "Changes how fast you run",
-    ["El slide no frena mientras manten\195\169s agacharte"] = "The slide never slows down while you hold crouch",
-    ["Velocidad del slide"] = "Slide speed", ["M\195\161s alto = acelera m\195\161s r\195\161pido"] = "Higher = speeds up faster",
-    ["Qu\195\169 tan alto salt\195\161s"] = "How high you jump", ["Altura"] = "Height", ["Normal del juego: 3"] = "Game default: 3", ["Normal del juego: 33"] = "Game default: 33",
-    ["Ritmo"] = "Rate", ["Cambios por segundo"] = "Changes per second",
-})
-
-local TabMove = Hydra:Tab({Id = "Move", Title = "Movimiento", Caption = "MOVER", Icon = "rbxassetid://130468910849957"})
-
-TabMove:Section("Velocidad", "\226\151\183")
-local Speed
-Speed = TabMove:Toggle({Id = "speedMain", Title = "Speed", Desc = "Cambia qu\195\169 tan r\195\161pido corr\195\169s", Icon = "\226\151\183", Keybind = true, Floating = true,
-    Callback = function(on)
-        SP.Enabled = on
-        if not SP.apply() and on then
-            Hydra:Notify("Speed: No disponible en este ejecutor")
-            SP.Enabled = false
-            task.defer(function() Speed:Set(false, true) end)
-        end
-    end})
-Speed:Slider({Id = "speedValue", Title = "Velocidad", Desc = "Normal del juego: 33", Min = 1, Max = 400, Step = 1, Default = 55,
-    Callback = function(v)
-        SP.Value = v
-        if SP.Enabled then SP.apply() end
-    end})
-SP.Value = Hydra.Options.speedValue:Get()
-
--- arma un toggle de movimiento frontal con sus sub-opciones (prefix = ids guardados)
-local function frontToggle(F, other, otherId, prefix, title, desc, icon, followDesc)
-    local toggle
-    toggle = TabMove:Toggle({Id = prefix == "sf" and "speedFront" or "backFront", Title = title, Desc = desc, Icon = icon, Keybind = true, Floating = true,
-        Callback = function(on)
-            if on and not Core.hook() then
-                Hydra:Notify(title .. ": No disponible en este ejecutor")
-                task.defer(function() toggle:Set(false, true) end)
-                return
-            end
-            F.Enabled = on
-            F.Speed = 0
-            -- no pueden ir los dos a la vez
-            if on and other.Enabled and Hydra.Options[otherId] then Hydra.Options[otherId]:Set(false) end
-        end})
-    toggle:Slider({Id = prefix .. "Speed", Title = "Velocidad m\195\161xima", Desc = "Hasta qu\195\169 velocidad llega", Min = 10, Max = 200, Step = 1, Default = 99,
-        Callback = function(v) F.MaxSpeed = v end})
-    toggle:Slider({Id = prefix .. "Accel", Title = "Aceleraci\195\179n", Desc = "Qu\195\169 tan r\195\161pido llega a la velocidad", Min = 1, Max = 30, Step = 1, Default = 9,
-        Callback = function(v) F.Accel = v end})
-    toggle:Slider({Id = prefix .. "RampMult", Title = "Multiplicador de rampa", Desc = "Cu\195\161nto te impulsa una rampa", Min = 0.1, Max = 5, Step = 0.05, Default = 1.55, Suffix = "x",
-        Callback = function(v) F.RampMult = v end})
-    toggle:Slider({Id = prefix .. "RampPower", Title = "Fuerza de rampa", Desc = "Fuerza base del salto en rampas", Min = 30, Max = 110, Step = 1, Default = 42,
-        Callback = function(v) F.RampPower = v end})
-    toggle:Toggle({Id = prefix .. "RampSpeed", Title = "Acelerar en rampas", Desc = "Gana velocidad un momento al pasar una rampa", Default = true,
-        Callback = function(on) F.RampSpeedBoost = on end})
-    toggle:Toggle({Id = prefix .. "Smooth", Title = "Suave", Desc = "Acelera y frena de a poco", Default = true,
-        Callback = function(on) F.Smooth = on end})
-    toggle:Toggle({Id = prefix .. "Follow", Title = "Seguir movimiento", Desc = followDesc,
-        Callback = function(on) F.FollowMove = on end})
-    -- los valores guardados se cargan al iniciar (el Callback solo corre cuando cambian)
-    F.MaxSpeed = Hydra.Options[prefix .. "Speed"]:Get()
-    F.Accel = Hydra.Options[prefix .. "Accel"]:Get()
-    F.RampMult = Hydra.Options[prefix .. "RampMult"]:Get()
-    F.RampPower = Hydra.Options[prefix .. "RampPower"]:Get()
-    F.RampSpeedBoost = Hydra.Options[prefix .. "RampSpeed"]:Get()
-    F.Smooth = Hydra.Options[prefix .. "Smooth"]:Get()
-    F.FollowMove = Hydra.Options[prefix .. "Follow"]:Get()
-    return toggle
-end
-frontToggle(SF, BF, "backFront", "sf", "Speed Front", "Te lleva hacia adelante sin trabarse", "rbxassetid://116954340494960", "Va hacia donde camin\195\161s, no hacia la c\195\161mara")
-frontToggle(BF, SF, "speedFront", "bf", "Back Front", "Te lleva hacia atr\195\161s sin trabarse", "rbxassetid://116954340494960", "Va hacia donde camin\195\161s, no hacia atr\195\161s de la c\195\161mara")
-
-local SpeedWithJump
-SpeedWithJump = TabMove:Toggle({Id = "speedWithJump", Title = "Speed with jump", Desc = "Salta solo y segu\195\173s caminando normal en el aire", Icon = "\226\151\142", Keybind = true, Floating = true,
-    Callback = function(on)
-        if on and not Core.hook() then
-            Hydra:Notify("Speed with jump: No disponible en este ejecutor")
-            task.defer(function() SpeedWithJump:Set(false, true) end)
-            return
-        end
-        SWJ.Enabled = on
-        SWJ.GroundSpeed = 0
-    end})
-SpeedWithJump:Slider({Id = "swjPower", Title = "Fuerza de salto", Desc = "Qu\195\169 tan alto salta", Min = 20, Max = 90, Step = 1, Default = 34,
-    Callback = function(v) SWJ.Power = v end})
-SpeedWithJump:Slider({Id = "swjDelay", Title = "Espera entre saltos", Desc = "Pausa al tocar el piso", Min = 0, Max = 1, Step = 0.05, Default = 0, Suffix = " s",
-    Callback = function(v) SWJ.Delay = v end})
-SpeedWithJump:Slider({Id = "swjAir", Title = "Velocidad en el aire", Desc = "1x = la misma que al caminar", Min = 0.5, Max = 2, Step = 0.05, Default = 1, Suffix = "x",
-    Callback = function(v) SWJ.AirMult = v end})
-SpeedWithJump:Toggle({Id = "swjOnlyMoving", Title = "Solo al caminar", Desc = "Si no te mov\195\169s, no salta", Default = true,
-    Callback = function(on) SWJ.OnlyMoving = on end})
-SWJ.Power = Hydra.Options.swjPower:Get()
-SWJ.Delay = Hydra.Options.swjDelay:Get()
-SWJ.AirMult = Hydra.Options.swjAir:Get()
-SWJ.OnlyMoving = Hydra.Options.swjOnlyMoving:Get()
-
-local InfiniteSlide
-InfiniteSlide = TabMove:Toggle({Id = "infiniteSlide", Title = "Infinite Slide", Desc = "El slide no frena mientras manten\195\169s agacharte", Icon = "\226\156\166", Keybind = true, Floating = true,
-    Callback = function(on)
-        if on and (Core.safeMode or not Core.hook()) then
-            Hydra:Notify("Infinite Slide: No disponible en este ejecutor")
-            task.defer(function() InfiniteSlide:Set(false, true) end)
-            return
-        end
-        IS.Enabled = on
-    end})
-InfiniteSlide:Slider({Id = "isBoost", Title = "Velocidad del slide", Desc = "M\195\161s alto = acelera m\195\161s r\195\161pido", Min = 1, Max = 150, Step = 1, Default = 8,
-    Callback = function(v) IS.Boost = v end})
-IS.Boost = Hydra.Options.isBoost:Get()
-
-local AutoCrouch
-AutoCrouch = TabMove:Toggle({Id = "autoCrouch", Title = "Auto Crouch", Desc = "Se agacha y se levanta solo", Icon = "\226\156\166", Keybind = true, Floating = true,
-    Callback = function(on)
-        if on and (Core.safeMode or not Core.hook()) then
-            Hydra:Notify("Auto Crouch: No disponible en este ejecutor")
-            task.defer(function() AutoCrouch:Set(false, true) end)
-            return
-        end
-        AC.Enabled = on
-        AC.Next = 0
-        if not on then AC.release() end
-    end})
-AutoCrouch:Slider({Id = "acRate", Title = "Ritmo", Desc = "Cambios por segundo", Min = 0.5, Max = 100, Step = 0.5, Default = 1.5, Suffix = "/s",
-    Callback = function(v) AC.Rate = v end})
-AC.Rate = Hydra.Options.acRate:Get()
-
-TabMove:Section("Salto", "\226\151\142")
-local JumpLayers
-JumpLayers = TabMove:Toggle({Id = "jumpLayers", Title = "Jump Layers", Desc = "Saltos extra en el aire", Icon = "rbxassetid://88035054740813", Keybind = true, Floating = true,
-    Callback = function(on)
-        JL.Enabled = on
-        if not JL.apply() and on then
-            Hydra:Notify("Jump Layers: No disponible en este ejecutor")
-            JL.Enabled = false
-            task.defer(function() JumpLayers:Set(false, true) end)
-        end
-    end})
-JumpLayers:Slider({Id = "jlLayers", Title = "Capas", Desc = "Cu\195\161ntas veces pod\195\169s saltar en el aire", Min = 1, Max = 50, Step = 1, Default = 3,
-    Callback = function(v)
-        JL.Layers = v
-        if JL.Enabled then JL.apply() end
-    end})
-
--- valor guardado de las capas
-JL.Layers = Hydra.Options.jlLayers:Get()
-
-local AdjustJump
-AdjustJump = TabMove:Toggle({Id = "adjustJump", Title = "Adjust Jump", Desc = "Qu\195\169 tan alto salt\195\161s", Icon = "\226\151\142", Keybind = true, Floating = true,
-    Callback = function(on)
-        AJ.Enabled = on
-        if not AJ.apply() and on then
-            Hydra:Notify("Adjust Jump: No disponible en este ejecutor")
-            AJ.Enabled = false
-            task.defer(function() AdjustJump:Set(false, true) end)
-        end
-    end})
-AdjustJump:Slider({Id = "ajHeight", Title = "Altura", Desc = "Normal del juego: 3", Min = 1, Max = 100, Step = 0.5, Default = 10,
-    Callback = function(v)
-        AJ.Height = v
-        if AJ.Enabled then AJ.apply() end
-    end})
-AJ.Height = Hydra.Options.ajHeight:Get()
-
--- ==================== PESTANA MORE ====================
--- Todo verificado en el codigo actual de Evade:
---  - Events.Interact:FireServer("Revive", tag, true) empieza a revivir y ("Revive", tag) lo termina; ("Carry", tag) carga
---    (InteractionService/InteractionTypes). El tiempo de revivir es "ReviveLength" del derribado.
---  - Events.SetPlayerMode:FireServer(true) es "jugar" (menu); Auto Spawn lo usa al quedar derribado (como Yin Yang).
---  - CharacterService: DataRegistry "Downed", "DownedPeriod" (1 -> 0 mientras se acaba el tiempo), "Carried",
---    "Carrying", "CanBeCarried", "Ragdolling", "Health".
---  - Tickets: modelos en workspace.Effects.Tickets; el juego los junta solo cuando estas a 14 studs (CollectionMethods.Distance).
-local More = {}
-function More.service()
-    if More.svc then return More.svc end
-    local ok, svc = pcall(function() return require(Core.module("Services", "Asset", "CharacterService")) end)
-    if ok and type(svc) == "table" then More.svc = svc end
-    return More.svc
-end
-function More.data(player)
-    local svc = More.service()
-    if not svc then return nil end
-    local ok, data = pcall(function() return svc:GetCharacterFromPlayer(player) end)
-    return ok and data or nil
-end
-function More.reg(data, key)
-    local ok, value = pcall(function() return data.DataRegistry:Get(key) end)
-    if ok then return value end
-    return nil
-end
-function More.isSet(value) return value ~= nil and value ~= false and value ~= 0 end
-function More.myRoot()
-    local char = LocalPlayer.Character
-    return char and char:FindFirstChild("HumanoidRootPart")
-end
-function More.event(name) return Core.module("Events", name) end
-
--- ---------- Auto Carry ----------
-local AutoCarry = {Enabled = false, Range = 30, Interval = 0.2}
-task.spawn(function()
-    while true do
-        task.wait(AutoCarry.Interval)
-        if AutoCarry.Enabled then
-            pcall(function()
-                local root = More.myRoot()
-                local me = More.data(LocalPlayer)
-                local interact = More.event("Interact")
-                if not root or not me or not interact then return end
-                if More.isSet(More.reg(me, "Carrying")) or More.reg(me, "Downed") then return end
-                for _, other in ipairs(Players:GetPlayers()) do
-                    local char = other ~= LocalPlayer and other.Character
-                    local otherRoot = char and char:FindFirstChild("HumanoidRootPart")
-                    local data = otherRoot and More.data(other)
-                    if data and More.reg(data, "Downed") and not More.isSet(More.reg(data, "Carried"))
-                        and More.reg(data, "CanBeCarried") ~= false and not More.reg(data, "Ragdolling")
-                        and (otherRoot.Position - root.Position).Magnitude <= AutoCarry.Range then
-                        local tag = char:GetAttribute("Tag")
-                        if tag then
-                            interact:FireServer("Carry", tag)
-                            return
-                        end
-                    end
-                end
-            end)
-        end
-    end
-end)
-
--- ---------- Auto Revive ----------
-local AutoRevive = {Enabled = false, Range = 30}
-task.spawn(function()
-    while true do
-        task.wait(0.5)
-        if AutoRevive.Enabled then
-            pcall(function()
-                local root = More.myRoot()
-                local interact = More.event("Interact")
-                local me = More.data(LocalPlayer)
-                if not root or not interact or (me and More.reg(me, "Downed")) then return end
-                for _, other in ipairs(Players:GetPlayers()) do
-                    if not AutoRevive.Enabled then return end
-                    local char = other ~= LocalPlayer and other.Character
-                    local otherRoot = char and char:FindFirstChild("HumanoidRootPart")
-                    local data = otherRoot and More.data(other)
-                    local tag = char and char:GetAttribute("Tag")
-                    if data and tag and More.reg(data, "Downed") and (otherRoot.Position - root.Position).Magnitude <= AutoRevive.Range then
-                        interact:FireServer("Revive", tag, true)
-                        task.wait(tonumber(More.reg(data, "ReviveLength")) or 1.5)
-                        if AutoRevive.Enabled and More.reg(data, "Downed") and otherRoot.Parent
-                            and (otherRoot.Position - root.Position).Magnitude <= AutoRevive.Range then
-                            interact:FireServer("Revive", tag)
-                        end
-                    end
-                end
-            end)
-        end
-    end
-end)
-
--- ---------- Auto Spawn ----------
-local AutoSpawn = {Enabled = false, Last = 0}
-task.spawn(function()
-    while true do
-        task.wait(0.2)
-        if AutoSpawn.Enabled and os.clock() - AutoSpawn.Last >= 3 then
-            pcall(function()
-                local me = More.data(LocalPlayer)
-                local remote = More.event("SetPlayerMode")
-                if me and remote and More.reg(me, "Downed") then
-                    AutoSpawn.Last = os.clock()
-                    remote:FireServer(true)
-                end
-            end)
-        end
-    end
-end)
-
--- ---------- ESP ----------
--- Jugadores: contorno a traves de paredes, nombre, distancia y vida arriba de la cabeza, lineas opcionales y flechas en
--- el borde de la pantalla que apuntan a los que no ves (con su distancia). Derribados: lo mismo en rojo, con el tiempo
--- que le queda (barra) y si lo estan cargando.
-local ESP = {
-    entries = {},
-    Players = {Enabled = false, MaxDist = 1500, Names = true, Health = true, Arrows = true, Tracers = false, Outline = true},
-    Downed = {Enabled = false, MaxDist = 3000, Arrows = true, Outline = true},
-    WHITE = Color3.new(1, 1, 1), RED = Color3.fromRGB(255, 92, 92), DIM = Color3.fromRGB(190, 196, 210),
+-- ==================== CONFIGURACION (se guarda en el executor) ====================
+local CONFIG_FILE = "Hydra.json"
+local Config = {
+    language = "auto", -- "auto" (idioma de Roblox), "es" o "en"
+    flags = {}, binds = {}, floats = {}, -- valores de las opciones, teclas de atajo y botones flotantes (API de Hydra)
 }
-function ESP.gui()
-    if ESP.screen and ESP.screen.Parent then return ESP.screen end
-    local screen = Instance.new("ScreenGui")
-    screen.Name = "HydraESP"
-    screen.ResetOnSpawn = false
-    screen.IgnoreGuiInset = true
-    screen.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-    screen.DisplayOrder = 5
-    local ok = pcall(function() screen.Parent = (type(gethui) == "function" and gethui()) or game:GetService("CoreGui") end)
-    if not ok or not screen.Parent then screen.Parent = LocalPlayer:WaitForChild("PlayerGui") end
-    ESP.screen = screen
-    return screen
-end
-function ESP.label(parent, size, font, color)
-    local label = Instance.new("TextLabel")
-    label.BackgroundTransparency = 1
-    label.Size = UDim2.new(1, 0, 0, size + 3)
-    label.Font = font
-    label.TextSize = size
-    label.TextColor3 = color
-    label.Text = ""
-    local outline = Instance.new("UIStroke")
-    outline.Thickness = 1.3
-    outline.Transparency = 0.25
-    outline.Parent = label
-    label.Parent = parent
-    return label
-end
-function ESP.bar(parent, width)
-    local back = Instance.new("Frame")
-    back.Size = UDim2.fromOffset(width, 4)
-    back.BackgroundColor3 = Color3.fromRGB(20, 22, 28)
-    back.BackgroundTransparency = 0.25
-    back.BorderSizePixel = 0
-    Instance.new("UICorner", back).CornerRadius = UDim.new(1, 0)
-    local fill = Instance.new("Frame")
-    fill.Size = UDim2.fromScale(1, 1)
-    fill.BackgroundColor3 = ESP.WHITE
-    fill.BorderSizePixel = 0
-    Instance.new("UICorner", fill).CornerRadius = UDim.new(1, 0)
-    fill.Parent = back
-    back.Parent = parent
-    return back, fill
-end
--- piezas de un jugador (se crean una vez y se reusan)
-function ESP.entry(player)
-    local e = ESP.entries[player]
-    if e then return e end
-    local screen = ESP.gui()
-    e = {}
-    local bb = Instance.new("BillboardGui")
-    bb.Name = "HydraESP_" .. player.Name
-    bb.Size = UDim2.fromOffset(170, 58)
-    bb.StudsOffset = Vector3.new(0, 3.2, 0)
-    bb.AlwaysOnTop = true
-    bb.LightInfluence = 0
-    bb.Enabled = false
-    local list = Instance.new("UIListLayout")
-    list.HorizontalAlignment = Enum.HorizontalAlignment.Center
-    list.VerticalAlignment = Enum.VerticalAlignment.Bottom
-    list.Padding = UDim.new(0, 2)
-    list.SortOrder = Enum.SortOrder.LayoutOrder
-    list.Parent = bb
-    e.tag = ESP.label(bb, 10, Enum.Font.GothamBlack, ESP.RED)
-    e.tag.LayoutOrder = 1
-    e.name = ESP.label(bb, 13, Enum.Font.GothamBold, ESP.WHITE)
-    e.name.LayoutOrder = 2
-    e.info = ESP.label(bb, 11, Enum.Font.GothamSemibold, ESP.DIM)
-    e.info.LayoutOrder = 3
-    e.barBack, e.bar = ESP.bar(bb, 64)
-    e.barBack.LayoutOrder = 4
-    bb.Parent = screen
-    e.bb = bb
-    -- flecha del borde: un rombo que apunta + la distancia
-    local arrow = Instance.new("Frame")
-    arrow.Size = UDim2.fromOffset(46, 46)
-    arrow.AnchorPoint = Vector2.new(0.5, 0.5)
-    arrow.BackgroundTransparency = 1
-    arrow.Visible = false
-    local tip = Instance.new("Frame")
-    tip.Size = UDim2.fromOffset(12, 12)
-    tip.AnchorPoint = Vector2.new(0.5, 0.5)
-    tip.Position = UDim2.new(0.5, 0, 0, 4)
-    tip.Rotation = 45
-    tip.BorderSizePixel = 0
-    tip.BackgroundColor3 = ESP.WHITE
-    tip.Parent = arrow
-    local dot = Instance.new("Frame")
-    dot.Size = UDim2.fromOffset(30, 30)
-    dot.AnchorPoint = Vector2.new(0.5, 0.5)
-    dot.Position = UDim2.fromScale(0.5, 0.55)
-    dot.BackgroundColor3 = Color3.fromRGB(14, 15, 20)
-    dot.BackgroundTransparency = 0.25
-    Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
-    local dotStroke = Instance.new("UIStroke")
-    dotStroke.Thickness = 1.5
-    dotStroke.Color = ESP.WHITE
-    dotStroke.Parent = dot
-    dot.Parent = arrow
-    local dist = Instance.new("TextLabel")
-    dist.BackgroundTransparency = 1
-    dist.Size = UDim2.fromScale(1, 1)
-    dist.Font = Enum.Font.GothamBlack
-    dist.TextSize = 9
-    dist.TextColor3 = ESP.WHITE
-    dist.Parent = dot
-    arrow.Parent = screen
-    -- nombre chiquito debajo del circulo, para saber a quien apunta
-    local arrowName = Instance.new("TextLabel")
-    arrowName.BackgroundTransparency = 1
-    arrowName.AnchorPoint = Vector2.new(0.5, 0)
-    arrowName.Position = UDim2.new(0.5, 0, 1, 2)
-    arrowName.Size = UDim2.fromOffset(90, 12)
-    arrowName.Font = Enum.Font.GothamBold
-    arrowName.TextSize = 10
-    arrowName.TextColor3 = ESP.WHITE
-    local nameOutline = Instance.new("UIStroke")
-    nameOutline.Thickness = 1.2
-    nameOutline.Transparency = 0.3
-    nameOutline.Parent = arrowName
-    arrowName.Parent = dot
-    e.arrow, e.tip, e.dot, e.dotStroke, e.arrowText, e.arrowName = arrow, tip, dot, dotStroke, dist, arrowName
-    -- linea desde abajo de la pantalla
-    local line = Instance.new("Frame")
-    line.AnchorPoint = Vector2.new(0.5, 0.5)
-    line.BorderSizePixel = 0
-    line.BackgroundTransparency = 0.35
-    line.Visible = false
-    line.Parent = screen
-    e.line = line
-    ESP.entries[player] = e
-    return e
-end
-function ESP.remove(player)
-    local e = ESP.entries[player]
-    if not e then return end
-    pcall(function() e.bb:Destroy() end)
-    pcall(function() e.arrow:Destroy() end)
-    pcall(function() e.line:Destroy() end)
-    if e.hl then pcall(function() e.hl:Destroy() end) end
-    ESP.entries[player] = nil
-end
-Players.PlayerRemoving:Connect(ESP.remove)
-function ESP.hide(e)
-    e.bb.Enabled = false
-    e.arrow.Visible = false
-    e.line.Visible = false
-    if e.hl then e.hl.Enabled = false end
-end
--- En Evade el cuerpo que se VE no es el personaje (Workspace.Players tiene solo la caja de colision): es el "rig" de
--- RigService (Workspace.Rigs), que se busca por el Tag del personaje (RigService:GetRigFromTag, verificado). Igual que
--- Yin Yang, la silueta va sobre ese rig y usa el resaltado del silbato del juego (Actions.Whistle.WhistleHighlight).
-function ESP.rigModel(char)
-    if ESP.rigService == nil then
-        local ok, svc = pcall(function() return require(Core.module("Services", "Asset", "RigService")) end)
-        ESP.rigService = (ok and type(svc) == "table") and svc or false
-    end
-    local tag = char:GetAttribute("Tag")
-    if ESP.rigService and tag then
-        local ok, rig = pcall(function() return ESP.rigService:GetRigFromTag(tag) end)
-        if ok and rig and typeof(rig.Model) == "Instance" and rig.Model:IsA("Model") and rig.Model.Parent then return rig.Model end
-    end
-    return char
-end
-function ESP.template()
-    if ESP.whistle == nil then
-        local found = Core.module("Objects", "Game", "Character", "ActionVisuals", "Actions", "Whistle")
-        ESP.whistle = found and found:FindFirstChild("WhistleHighlight") or false
-    end
-    return ESP.whistle or nil
-end
-function ESP.outline(e, char, model, color, on)
-    if not on then
-        if e.hl then e.hl.Enabled = false end
-        return
-    end
-    if not e.hl or e.hl.Parent ~= char then
-        if e.hl then pcall(function() e.hl:Destroy() end) end
-        local template = ESP.template()
-        local hl = template and template:Clone() or Instance.new("Highlight")
-        hl.Name = "HydraHL"
-        hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-        if not template then
-            hl.FillTransparency = 0.5
-            hl.OutlineTransparency = 0
-        end
-        hl.Parent = char
-        e.hl = hl
-    end
-    e.hl.Adornee = model
-    e.hl.FillColor = color
-    e.hl.OutlineColor = color
-    e.hl.Enabled = true
-end
-function ESP.step()
-    local cam = workspace.CurrentCamera
-    local myRoot = More.myRoot()
-    local screen = ESP.screen
-    if not cam or not screen then return end
-    local view = cam.ViewportSize
-    local center = Vector2.new(view.X / 2, view.Y / 2)
-    local radius = math.min(view.X, view.Y) * 0.36
-    local anyOn = ESP.Players.Enabled or ESP.Downed.Enabled
-    for _, player in ipairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer then
-            local char = player.Character
-            local root = char and char:FindFirstChild("HumanoidRootPart")
-            local e = anyOn and root and ESP.entry(player)
-            if e then
-                local data = More.data(player)
-                local downed = data and More.reg(data, "Downed") == true
-                local cfg = downed and ESP.Downed or ESP.Players
-                -- si el derribado no tiene su ESP prendido, se muestra con el de jugadores (sin datos de derribado)
-                if downed and not ESP.Downed.Enabled then cfg, downed = ESP.Players, false end
-                -- distancia desde tu personaje (o desde la camara si estas en el menu / espectando)
-                local distance = (root.Position - (myRoot and myRoot.Position or cam.CFrame.Position)).Magnitude
-                if not cfg.Enabled or distance > cfg.MaxDist then
-                    ESP.hide(e)
-                else
-                    local color = downed and ESP.RED or ESP.WHITE
-                    local model = ESP.rigModel(char)
-                    ESP.outline(e, char, model, color, cfg.Outline)
-                    -- cartel arriba de la cabeza
-                    e.bb.Adornee = model:FindFirstChild("Head", true) or root
-                    e.bb.Enabled = true
-                    e.tag.Visible = downed
-                    if downed then
-                        local carried = More.isSet(More.reg(data, "Carried"))
-                        e.tag.Text = Hydra:T(carried and "CARGADO" or "DERRIBADO")
-                    end
-                    e.name.Visible = downed or cfg.Names
-                    e.name.Text = player.DisplayName
-                    e.name.TextColor3 = color
-                    local hum = char:FindFirstChildOfClass("Humanoid")
-                    local health = data and tonumber(More.reg(data, "Health")) or (hum and hum.Health) or 0
-                    e.info.Text = math.floor(distance + 0.5) .. "m" .. ((not downed and cfg.Health) and ("  \194\183  " .. math.floor(health + 0.5) .. " hp") or "")
-                    local showBar = downed or cfg.Health
-                    e.barBack.Visible = showBar
-                    if showBar then
-                        local fraction
-                        if downed then
-                            fraction = math.clamp(tonumber(More.reg(data, "DownedPeriod")) or 1, 0, 1)
-                        else
-                            local maxHealth = hum and hum.MaxHealth or 100
-                            fraction = math.clamp(health / math.max(maxHealth, 1), 0, 1)
-                        end
-                        e.bar.Size = UDim2.fromScale(fraction, 1)
-                        e.bar.BackgroundColor3 = downed and ESP.RED:Lerp(Color3.fromRGB(90, 20, 20), 1 - fraction) or ESP.WHITE
-                    end
-                    -- en pantalla o flecha en el borde
-                    local point, onScreen = cam:WorldToViewportPoint(root.Position)
-                    local visible = onScreen and point.Z > 0
-                    if not visible and cfg.Arrows then
-                        local rel = cam.CFrame:PointToObjectSpace(root.Position)
-                        local angle = math.atan2(rel.X, -rel.Z)
-                        e.arrow.Position = UDim2.fromOffset(center.X + math.sin(angle) * radius, center.Y - math.cos(angle) * radius)
-                        e.arrow.Rotation = math.deg(angle)
-                        e.dot.Rotation = -math.deg(angle)
-                        e.tip.BackgroundColor3 = color
-                        e.dotStroke.Color = color
-                        e.arrowText.Text = math.floor(distance + 0.5) .. "m"
-                        e.arrowName.Text = player.DisplayName
-                        e.arrowName.TextColor3 = color
-                        e.arrowText.TextColor3 = color
-                        e.arrow.Visible = true
-                    else
-                        e.arrow.Visible = false
-                    end
-                    if visible and not downed and cfg.Tracers then
-                        local from = Vector2.new(center.X, view.Y - 6)
-                        local to = Vector2.new(point.X, point.Y)
-                        local delta = to - from
-                        e.line.Size = UDim2.fromOffset(delta.Magnitude, 1.5)
-                        e.line.Position = UDim2.fromOffset((from.X + to.X) / 2, (from.Y + to.Y) / 2)
-                        e.line.Rotation = math.deg(math.atan2(delta.Y, delta.X))
-                        e.line.BackgroundColor3 = color
-                        e.line.Visible = true
-                    else
-                        e.line.Visible = false
-                    end
-                end
-            elseif ESP.entries[player] then
-                ESP.hide(ESP.entries[player])
-            end
-        end
-    end
-end
-RunService.RenderStepped:Connect(function()
-    if ESP.Players.Enabled or ESP.Downed.Enabled then
-        pcall(ESP.step)
-    elseif ESP.screen then
-        for _, e in pairs(ESP.entries) do ESP.hide(e) end
-    end
-end)
-
--- ---------- Auto Farm de tickets ----------
-local Farm = {Enabled = false, Return = true, Busy = false}
-function Farm.tickets()
-    local effects = workspace:FindFirstChild("Effects")
-    local folder = effects and effects:FindFirstChild("Tickets")
-    local list = {}
-    if folder then
-        for _, model in ipairs(folder:GetChildren()) do
-            if model:IsA("Model") and model.PrimaryPart then list[#list + 1] = model end
-        end
-    end
-    return list
-end
-function Farm.canMove()
-    local char = LocalPlayer.Character
-    local hum = char and char:FindFirstChildOfClass("Humanoid")
-    local me = More.data(LocalPlayer)
-    return hum and hum.Health > 0 and not (me and More.reg(me, "Downed"))
-end
--- se teletransporta directo a la posicion
-function Farm.travel(root, target)
-    if not Farm.Enabled or not root.Parent then return false end
-    root.CFrame = CFrame.new(target)
-    root.AssemblyLinearVelocity = Vector3.zero
-    return true
-end
-task.spawn(function()
-    while true do
-        task.wait(0.5)
-        if Farm.Enabled and not Farm.Busy and Farm.canMove() then
-            local list = Farm.tickets()
-            local root = More.myRoot()
-            if #list > 0 and root then
-                Farm.Busy = true
-                pcall(function()
-                    local home = root.CFrame
-                    for _ = 1, #list do
-                        if not Farm.Enabled or not Farm.canMove() then break end
-                        -- el mas cercano primero
-                        local best, bestDist
-                        for _, model in ipairs(Farm.tickets()) do
-                            local d = (model.PrimaryPart.Position - root.Position).Magnitude
-                            if not bestDist or d < bestDist then best, bestDist = model, d end
-                        end
-                        if not best then break end
-                        -- se queda en ese ticket hasta que el juego lo junte (el modelo se borra al juntarlo, o cuando vence a
-                        -- los 60 s). Si algo lo mueve, vuelve al ticket. No va por otro hasta terminar con este.
-                        local target = best.PrimaryPart.Position + Vector3.new(0, 2, 0)
-                        local stopped = false
-                        while best.Parent and best.PrimaryPart do
-                            if not Farm.Enabled or not Farm.canMove() or not root.Parent then stopped = true break end
-                            if (root.Position - target).Magnitude > 6 then Farm.travel(root, target) end
-                            task.wait(0.1)
-                        end
-                        if stopped then break end
-                    end
-                    -- con el AFK prendido siempre vuelve al bloque; si no, a donde estaba (si "Volver" esta prendido)
-                    if More.afkReturn and More.afkReturn() then return end
-                    if Farm.Return and Farm.Enabled and Farm.canMove() and root.Parent then Farm.travel(root, home.Position) end
-                end)
-                Farm.Busy = false
-            end
-        end
-    end
-end)
-
--- ---------- AFK ----------
--- Te lleva a una plataforma en el cielo, muy lejos del mapa (los bots no llegan). La plataforma es local, grande, con el
--- logo de Hydra de fondo. Si reapareces con el AFK prendido, te vuelve a llevar. Ademas evita que Roblox te saque por
--- estar quieto (Players.LocalPlayer.Idled). Al apagarlo volves a donde estabas.
--- Con el auto farm: sale de la plataforma a juntar los tickets y despues vuelve a ella.
-local AFK = {Enabled = false, Home = nil, Platform = nil, SPOT = Vector3.new(9000, 1600, 9000), LOGO = "rbxassetid://114974832117287"}
-function AFK.build()
-    if AFK.Platform and AFK.Platform.Parent then return AFK.Platform end
-    local model = Instance.new("Model")
-    model.Name = "HydraAFK"
-    local base = Instance.new("Part")
-    base.Name = "Base"
-    base.Size = Vector3.new(70, 4, 70)
-    base.Anchored = true
-    base.CanCollide = true
-    base.Material = Enum.Material.SmoothPlastic
-    base.Color = Color3.fromRGB(14, 15, 20)
-    base.CFrame = CFrame.new(AFK.SPOT)
-    base.Parent = model
-    for _, face in ipairs({Enum.NormalId.Top, Enum.NormalId.Bottom}) do
-        local decal = Instance.new("Decal")
-        decal.Face = face
-        decal.Texture = AFK.LOGO
-        decal.Parent = base
-    end
-    -- borde con brillo y una luz suave
-    local edge = Instance.new("SelectionBox")
-    edge.Adornee = base
-    edge.LineThickness = 0.25
-    edge.Color3 = Color3.fromRGB(235, 238, 245)
-    edge.SurfaceTransparency = 1
-    edge.Parent = base
-    local light = Instance.new("PointLight")
-    light.Range = 40
-    light.Brightness = 1.5
-    light.Color = Color3.fromRGB(235, 238, 245)
-    light.Parent = base
-    model.PrimaryPart = base
-    model.Parent = workspace
-    AFK.Platform = model
-    return model
-end
-function AFK.goUp()
-    local root = More.myRoot()
-    if not root then return false end
-    AFK.build()
-    root.CFrame = CFrame.new(AFK.SPOT + Vector3.new(0, 6, 0))
-    root.AssemblyLinearVelocity = Vector3.zero
-    return true
-end
-function AFK.set(on)
-    AFK.Enabled = on
-    More.afkReturn = on and function() return AFK.Enabled and AFK.goUp() end or nil
-    local root = More.myRoot()
-    if on then
-        AFK.Home = root and root.CFrame or nil
-        AFK.goUp()
-    else
-        if root and AFK.Home then
-            root.CFrame = AFK.Home
-            root.AssemblyLinearVelocity = Vector3.zero
-        end
-        AFK.Home = nil
-        if AFK.Platform then AFK.Platform:Destroy() AFK.Platform = nil end
-    end
-end
--- si reapareces o el juego te mueve de la plataforma, te vuelve a subir
-task.spawn(function()
-    while true do
-        task.wait(0.25)
-        if AFK.Enabled then
-            pcall(function()
-                local root = More.myRoot()
-                -- mientras el auto farm junta tickets no se lo interrumpe: al terminar vuelve solo a la plataforma
-                if root and not Farm.Busy and (root.Position - AFK.SPOT).Magnitude > 80 then AFK.goUp() end
-            end)
-        end
-    end
-end)
--- anti-AFK de Roblox (no te saca a los 20 minutos)
-LocalPlayer.Idled:Connect(function()
-    if not AFK.Enabled then return end
-    pcall(function()
-        local vu = game:GetService("VirtualUser")
-        vu:CaptureController()
-        vu:ClickButton2(Vector2.new())
-    end)
-end)
-
--- ---------- Anti Bot ----------
--- Misma logica que Yin Yang (Anti Bot v2): si un nextbot se acerca a menos de la distancia elegida, te mueve al lugar
--- MAS SEGURO: prueba puntos alejandose del bot (atras y en abanico, 35 a 70 studs) y junto a jugadores vivos; descarta
--- los que quedan cerca de cualquier bot; cada punto necesita piso debajo y lugar para pararse.
--- Los bots son personajes de CharacterService con AI = true (verificado). No actua si estas derribado o te cargan,
--- ni mientras estas AFK o el auto farm esta juntando.
-local AntiBot = {Enabled = false, Distance = 10, Cooldown = 0.15, Last = 0, rays = RaycastParams.new(), acc = 0}
-AntiBot.rays.FilterType = Enum.RaycastFilterType.Exclude
-function AntiBot.ignore(char)
-    local list = {char}
-    for _, name in ipairs({"Players", "Rigs"}) do
-        local folder = workspace:FindFirstChild(name)
-        if folder then list[#list + 1] = folder end
-    end
-    return list
-end
-function AntiBot.safeSpot(candidate, char)
-    AntiBot.rays.FilterDescendantsInstances = AntiBot.ignore(char)
-    local down = workspace:Raycast(candidate + Vector3.new(0, 50, 0), Vector3.new(0, -1000, 0), AntiBot.rays)
-    if not down then return nil end
-    local spot = Vector3.new(candidate.X, down.Position.Y + 3, candidate.Z)
-    if workspace:Raycast(spot, Vector3.new(0, 5, 0), AntiBot.rays) then return nil end
-    return spot
-end
-function AntiBot.step()
-    local now = os.clock()
-    if now - AntiBot.Last < AntiBot.Cooldown or AFK.Enabled or Farm.Busy then return end
-    local char = LocalPlayer.Character
-    local root = char and char:FindFirstChild("HumanoidRootPart")
-    local svc = More.service()
-    local me = More.data(LocalPlayer)
-    if not root or not svc or not me then return end
-    if More.reg(me, "Downed") or More.isSet(More.reg(me, "Carried")) then return end
-    local ok, chars = pcall(function() return svc:GetCharacters() end)
-    if not ok or type(chars) ~= "table" then return end
-    local myPos = root.Position
-    local bots, nearest, nearestDist = {}, nil, math.huge
-    local alive = {}
-    for _, v in pairs(chars) do
-        if type(v) == "table" and v.Done and v.PrimaryPart then
-            local okPos, pos = pcall(function() return v.PrimaryPart.Position end)
-            if okPos then
-                if v.AI == true then
-                    bots[#bots + 1] = pos
-                    local d = (pos - myPos).Magnitude
-                    if d < nearestDist then nearest, nearestDist = pos, d end
-                elseif not v.Local and v.PlayerReference and not More.reg(v, "Downed") and not More.isSet(More.reg(v, "Carried")) then
-                    alive[#alive + 1] = pos
-                end
-            end
-        end
-    end
-    if not nearest or nearestDist >= AntiBot.Distance then return end
-    local function clearance(p)
-        local m = math.huge
-        for _, b in ipairs(bots) do m = math.min(m, (b - p).Magnitude) end
-        return m
-    end
-    local candidates = {}
-    local away = (myPos - nearest) * Vector3.new(1, 0, 1)
-    away = away.Magnitude < 0.1 and Vector3.new(1, 0, 0) or away.Unit
-    for _, angle in ipairs({0, 35, -35, 70, -70}) do
-        local dir = CFrame.Angles(0, math.rad(angle), 0):VectorToWorldSpace(away)
-        for _, radius in ipairs({45, 70, 35}) do candidates[#candidates + 1] = myPos + dir * radius end
-    end
-    for _, pos in ipairs(alive) do
-        candidates[#candidates + 1] = pos + Vector3.new(math.random(-5, 5), 0, math.random(-5, 5))
-    end
-    local minSafe = math.max(AntiBot.Distance * 2, 30)
-    local best, bestScore, checks = nil, -math.huge, 0
-    for _, c in ipairs(candidates) do
-        local score = clearance(c)
-        if score >= minSafe and score > bestScore then
-            checks = checks + 1
-            local spot = AntiBot.safeSpot(c, char)
-            if spot then best, bestScore = spot, score end
-            if checks >= 12 then break end
-        end
-    end
-    if not best then return end
-    local look = (best - nearest) * Vector3.new(1, 0, 1)
-    root.CFrame = look.Magnitude > 0.1 and CFrame.new(best, best + look) or CFrame.new(best)
-    AntiBot.Last = now
-end
-RunService.Heartbeat:Connect(function(dt)
-    if not AntiBot.Enabled then return end
-    AntiBot.acc = AntiBot.acc + dt
-    if AntiBot.acc < 0.1 then return end
-    AntiBot.acc = 0
-    pcall(AntiBot.step)
-end)
-
--- ---------- interfaz ----------
-Hydra:AddTranslations({
-    ["Ayuda"] = "Help", ["Visual"] = "Visual", ["Farm"] = "Farm",
-    ["Carga solo a los derribados cerca tuyo"] = "Carries nearby downed players by itself",
-    ["Distancia"] = "Range", ["Hasta qu\195\169 distancia act\195\186a"] = "How far it works", ["Espera"] = "Delay", ["Entre intentos"] = "Between attempts",
-    ["Revive solo a los derribados cerca tuyo"] = "Revives nearby downed players by itself",
-    ["Si qued\195\161s derribado, vuelve a aparecer solo"] = "If you get downed, you respawn by itself",
-    ["ESP jugadores"] = "Player ESP", ["Encontr\195\161 a todos, incluso a trav\195\169s de paredes"] = "Find everyone, even through walls",
-    ["Distancia m\195\161xima"] = "Max distance", ["M\195\161s lejos no se muestra"] = "Farther away is hidden",
-    ["Nombres"] = "Names", ["Vida"] = "Health", ["Flechas en el borde"] = "Edge arrows", ["Apuntan a los que no ves"] = "Point at the ones you can't see",
-    ["L\195\173neas"] = "Lines", ["Desde abajo de la pantalla hasta cada uno"] = "From the bottom of the screen to each one",
-    ["Contorno"] = "Outline", ["Silueta a trav\195\169s de paredes"] = "Silhouette through walls",
-    ["ESP derribados"] = "Downed ESP", ["Derribados con su tiempo restante"] = "Downed players with their remaining time",
-    ["Auto farm tickets"] = "Auto farm tickets", ["Junta los tickets del mapa solo"] = "Collects the map tickets by itself",
-    ["Velocidad de viaje"] = "Travel speed", ["Qu\195\169 tan r\195\161pido va a cada ticket"] = "How fast it goes to each ticket",
-    ["Directo"] = "Instant", ["Aparece en el ticket sin deslizarse"] = "Appears on the ticket without gliding",
-    ["Volver"] = "Return", ["Al terminar vuelve a donde estabas"] = "When done, goes back to where you were",
-    ["DERRIBADO"] = "DOWNED", ["CARGADO"] = "CARRIED",
-    ["Te deja en una plataforma en el cielo, lejos de todo"] = "Leaves you on a platform in the sky, far from everything",
-    ["Te aleja de los nextbots cuando se acercan"] = "Moves you away from nextbots when they get close",
-    ["Distancia de reacci\195\179n"] = "Reaction distance", ["Si un bot est\195\161 m\195\161s cerca, te mueve"] = "If a bot is closer, it moves you",
-    ["Entre teletransportes"] = "Between teleports",
-})
-ESP.gui()
-local TabMore = Hydra:Tab({Id = "More", Title = "More", Caption = "MORE", Icon = "rbxassetid://114688401779019"})
-
-TabMore:Section("Ayuda", "\226\156\166")
-local CarryToggle = TabMore:Toggle({Id = "autoCarry", Title = "Auto Carry", Desc = "Carga solo a los derribados cerca tuyo", Icon = "\226\156\166", Keybind = true, Floating = true,
-    Callback = function(on) AutoCarry.Enabled = on end})
-CarryToggle:Slider({Id = "carryRange", Title = "Distancia", Desc = "Hasta qu\195\169 distancia act\195\186a", Min = 5, Max = 60, Step = 1, Default = 30, Suffix = " m",
-    Callback = function(v) AutoCarry.Range = v end})
-CarryToggle:Slider({Id = "carryDelay", Title = "Espera", Desc = "Entre intentos", Min = 0.05, Max = 1, Step = 0.05, Default = 0.2, Suffix = " s",
-    Callback = function(v) AutoCarry.Interval = v end})
-local ReviveToggle = TabMore:Toggle({Id = "autoRevive", Title = "Auto Revive", Desc = "Revive solo a los derribados cerca tuyo", Icon = "\226\156\166", Keybind = true, Floating = true,
-    Callback = function(on) AutoRevive.Enabled = on end})
-ReviveToggle:Slider({Id = "reviveRange", Title = "Distancia", Desc = "Hasta qu\195\169 distancia act\195\186a", Min = 5, Max = 30, Step = 1, Default = 30, Suffix = " m",
-    Callback = function(v) AutoRevive.Range = v end})
-TabMore:Toggle({Id = "autoSpawn", Title = "Auto Spawn", Desc = "Si qued\195\161s derribado, vuelve a aparecer solo", Icon = "\226\156\166", Keybind = true, Floating = true,
-    Callback = function(on) AutoSpawn.Enabled = on end})
-local AntiBotToggle = TabMore:Toggle({Id = "antiBot", Title = "Anti Bot", Desc = "Te aleja de los nextbots cuando se acercan", Icon = "\226\156\166", Keybind = true, Floating = true,
-    Callback = function(on) AntiBot.Enabled = on end})
-AntiBotToggle:Slider({Id = "antiBotDist", Title = "Distancia de reacci\195\179n", Desc = "Si un bot est\195\161 m\195\161s cerca, te mueve", Min = 1, Max = 25, Step = 1, Default = 10, Suffix = " m",
-    Callback = function(v) AntiBot.Distance = v end})
-AntiBotToggle:Slider({Id = "antiBotCd", Title = "Espera", Desc = "Entre teletransportes", Min = 0.05, Max = 2, Step = 0.05, Default = 0.15, Suffix = " s",
-    Callback = function(v) AntiBot.Cooldown = v end})
-
-TabMore:Section("Visual", "\226\151\142")
-local EspToggle = TabMore:Toggle({Id = "espPlayers", Title = "ESP jugadores", Desc = "Encontr\195\161 a todos, incluso a trav\195\169s de paredes", Icon = "\226\151\142", Keybind = true, Floating = true,
-    Callback = function(on) ESP.Players.Enabled = on end})
-EspToggle:Slider({Id = "espDist", Title = "Distancia m\195\161xima", Desc = "M\195\161s lejos no se muestra", Min = 50, Max = 5000, Step = 50, Default = 1500, Suffix = " m",
-    Callback = function(v) ESP.Players.MaxDist = v end})
-EspToggle:Toggle({Id = "espNames", Title = "Nombres", Default = true, Callback = function(on) ESP.Players.Names = on end})
-EspToggle:Toggle({Id = "espHealth", Title = "Vida", Default = true, Callback = function(on) ESP.Players.Health = on end})
-EspToggle:Toggle({Id = "espArrows", Title = "Flechas en el borde", Desc = "Apuntan a los que no ves", Default = true, Callback = function(on) ESP.Players.Arrows = on end})
-EspToggle:Toggle({Id = "espLines", Title = "L\195\173neas", Desc = "Desde abajo de la pantalla hasta cada uno", Callback = function(on) ESP.Players.Tracers = on end})
-EspToggle:Toggle({Id = "espOutline", Title = "Contorno", Desc = "Silueta a trav\195\169s de paredes", Default = true, Callback = function(on) ESP.Players.Outline = on end})
-local DownToggle = TabMore:Toggle({Id = "espDowned", Title = "ESP derribados", Desc = "Derribados con su tiempo restante", Icon = "\226\151\142", Keybind = true, Floating = true,
-    Callback = function(on) ESP.Downed.Enabled = on end})
-DownToggle:Slider({Id = "espDownDist", Title = "Distancia m\195\161xima", Desc = "M\195\161s lejos no se muestra", Min = 50, Max = 5000, Step = 50, Default = 3000, Suffix = " m",
-    Callback = function(v) ESP.Downed.MaxDist = v end})
-DownToggle:Toggle({Id = "espDownArrows", Title = "Flechas en el borde", Desc = "Apuntan a los que no ves", Default = true, Callback = function(on) ESP.Downed.Arrows = on end})
-DownToggle:Toggle({Id = "espDownOutline", Title = "Contorno", Desc = "Silueta a trav\195\169s de paredes", Default = true, Callback = function(on) ESP.Downed.Outline = on end})
-
-TabMore:Section("Farm", "\226\158\164")
-TabMore:Toggle({Id = "afk", Title = "AFK", Desc = "Te deja en una plataforma en el cielo, lejos de todo", Icon = "\226\158\164", Keybind = true, Floating = true,
-    Callback = function(on) AFK.set(on) end})
-local FarmToggle = TabMore:Toggle({Id = "ticketFarm", Title = "Auto farm tickets", Desc = "Junta los tickets del mapa solo", Icon = "\226\158\164", Keybind = true, Floating = true,
-    Callback = function(on) Farm.Enabled = on end})
-FarmToggle:Toggle({Id = "farmReturn", Title = "Volver", Desc = "Al terminar vuelve a donde estabas", Default = true, Callback = function(on) Farm.Return = on end})
-
--- valores guardados (el Callback de los sliders y sub-opciones solo corre cuando cambian)
-AutoCarry.Range, AutoCarry.Interval = Hydra.Options.carryRange:Get(), Hydra.Options.carryDelay:Get()
-AutoRevive.Range = Hydra.Options.reviveRange:Get()
-ESP.Players.MaxDist, ESP.Players.Names, ESP.Players.Health = Hydra.Options.espDist:Get(), Hydra.Options.espNames:Get(), Hydra.Options.espHealth:Get()
-ESP.Players.Arrows, ESP.Players.Tracers, ESP.Players.Outline = Hydra.Options.espArrows:Get(), Hydra.Options.espLines:Get(), Hydra.Options.espOutline:Get()
-ESP.Downed.MaxDist, ESP.Downed.Arrows, ESP.Downed.Outline = Hydra.Options.espDownDist:Get(), Hydra.Options.espDownArrows:Get(), Hydra.Options.espDownOutline:Get()
-Farm.Return = Hydra.Options.farmReturn:Get()
-AntiBot.Distance, AntiBot.Cooldown = Hydra.Options.antiBotDist:Get(), Hydra.Options.antiBotCd:Get()
-
--- ==================== PESTANA EXTRA: UNLOCK ALL ====================
--- Desbloquea de forma VISUAL (solo en tu pantalla) emotes, cosmeticos, personajes, unusuals, perks, animaciones de
--- cargar, nametags, boombox y skins de herramientas, parcheando los modulos del juego (Items.Registry, Inventory,
--- Loadout, la rueda de emotes, etc.). Modulo completo de Unlock All (necesita que require() de los modulos reales).
-getgenv().HydraScriptText = function(es, en)
-    Hydra:AddTranslations({[es] = en})
-    return Hydra:T(es)
-end
-do
-local GENV = (type(getgenv) == "function" and getgenv()) or _G
-if GENV.HydraUnlockAll and GENV.HydraUnlockAll.Disable then
-    pcall(GENV.HydraUnlockAll.Disable)
-end
-
-GENV.HydraUnlockAll = (function()
-    local M = {}
-
-    local Players = game:GetService("Players")
-    local RS = game:GetService("ReplicatedStorage")
-    local StarterGui = game:GetService("StarterGui")
-    local LP = Players.LocalPlayer
-
-    local PREFIX = "[Hydra-UnlockAll]"
-    local LOG = {}
-    local function log(...)
-        local parts = {}
-        for i = 1, select("#", ...) do
-            parts[i] = tostring((select(i, ...)))
-        end
-        local line = PREFIX .. " " .. table.concat(parts, " ")
-        LOG[#LOG + 1] = line
-        if #LOG > 200 then
-            table.remove(LOG, 1)
-        end
-    end
-
-    local function path(root, ...)
-        local cur = root
-        for _, name in ipairs({ ... }) do
-            if not cur then
-                return nil
-            end
-            cur = cur:WaitForChild(name, 10)
-        end
-        return cur
-    end
-
-    local function req(label, ...)
-        local names = { ... }
-        local ok, res = pcall(function()
-            local inst = path(RS, table.unpack(names))
-            if not inst then
-                error("no se encontro la ruta")
-            end
-            return require(inst)
-        end)
-        if not ok then
-            log("FALLO cargando", label, "->", tostring(res))
-            return nil
-        end
-        return res
-    end
-
-    local active = false
-    local gen = 0
-    local patches = {}
-    local patchResults = {}
-
-    local fakeE = {}
-    local fakeC = {}
-    local pending = nil
-    local popupInst = nil
-    local warnedOverlay = false
-    local lastBuild = {}
-
-    local emoteOn, cosOn = false, false
-
-    local UA2 = {
-        fakeS = {},
-        SKINS = {},
-        SKINSET = {},
-        skinOn = false,
-        extraLocked = false,
-        slotsOn = false,
-        warnedNoBase = false,
-    }
-    local fakeS = UA2.fakeS
-
-    local Registry, Inventory, Loadout, PopupService, EmotePopup, EmoteClass, ItemSvc, RigClass, DataRegClass
-    local PackageMod, SlotsView
-    local EventSvc, ShopsSvc
-
-    local origGetOwned, origOwns, origIsEquipped, origGetFromSlot, origSlotTypeForSlot, origSetEquipped
-    local ItemSlotType
-
-    local ALL, ALLSET = {}, {}
-
-    local TYPE_NAMES = { "Cosmetic", "Character", "Unusual", "Perk", "CarryAnimation", "Nametag", "Boombox" }
-    local ENABLED, KNOWN = {}, {}
-    for _, n in ipairs(TYPE_NAMES) do
-        ENABLED[n] = true
-        KNOWN[n] = true
-    end
-
-    local INGAME = { Perk = true, Nametag = true, Boombox = true }
-    local function emptyByType()
-        local t = {}
-        for _, n in ipairs(TYPE_NAMES) do
-            t[n] = {}
-        end
-        return t
-    end
-    local BYTYPE = emptyByType()
-    local TYPE_OF = {}
-
-    M.Log = LOG
-    M.FakeEmotes = fakeE
-    M.FakeCosmetics = fakeC
-    M.FakeSkins = fakeS
-    M.LastBuild = lastBuild
-
-    local function writable(t)
-        local function probe()
-            return pcall(function()
-                t.__hydra_probe = nil
-            end)
-        end
-        if probe() then
-            return true
-        end
-        if type(setreadonly) == "function" then
-            pcall(setreadonly, t, false)
-        end
-        if probe() then
-            return true
-        end
-        if type(make_writeable) == "function" then
-            pcall(make_writeable, t)
-        end
-        return probe()
-    end
-
-    local function patch(label, tbl, key, build)
-        local orig = tbl[key]
-        if type(orig) ~= "function" then
-            log("PARCHE NO APLICADO (no existe la funcion):", label)
-            patchResults[#patchResults + 1] = { label = label, ok = false }
-            return false
-        end
-        if not writable(tbl) then
-            log("PARCHE NO APLICADO (tabla de solo lectura, falta setreadonly):", label)
-            patchResults[#patchResults + 1] = { label = label, ok = false }
-            return false
-        end
-        patches[#patches + 1] = { tbl = tbl, key = key, orig = orig }
-        tbl[key] = build(orig)
-        patchResults[#patchResults + 1] = { label = label, ok = true }
-        return true
-    end
-
-    local function patchBoth(label, key, build)
-        patch("useLoadout." .. label, Loadout, key, build)
-        patch("useInventory." .. label, Inventory, key, build)
-    end
-
-    local function slotIndex(slot)
-        return tonumber(string.match(tostring(slot), "^EmoteSlot_(%d+)$"))
-    end
-
-    local function realSlotId(idx)
-        local ok, id = pcall(origGetFromSlot, "EmoteSlot_" .. idx)
-        if ok and type(id) == "number" then
-            return id
-        end
-        return 0
-    end
-
-    local function owns(id)
-        local ok, res = pcall(origOwns, id)
-        return ok and res == true
-    end
-
-    local function pickBase()
-        local ok, owned = pcall(origGetOwned, "Emote")
-        if not ok or type(owned) ~= "table" then
-            return nil
-        end
-        local list = table.clone(owned)
-        table.sort(list)
-        for _, id in ipairs(list) do
-            if not origIsEquipped(id) then
-                return id
-            end
-        end
-        return nil
-    end
-
-    local function isExtraSlot(idx)
-        return UA2.slotsOn and UA2.extraLocked and type(idx) == "number" and idx > 6
-    end
-
-    local function baseEmoteId()
-        for i = 1, 6 do
-            local id = realSlotId(i)
-            if id ~= 0 then
-                return id
-            end
-        end
-        return nil
-    end
-
-    local function augmentEmotes(list)
-        if type(list) ~= "table" or not (UA2.slotsOn and UA2.extraLocked) then
-            return list
-        end
-        local out = table.clone(list)
-        local base = baseEmoteId()
-        for idx = 7, 12 do
-            if fakeE[idx] and base then
-                out[idx] = base
-            elseif realSlotId(idx) == 0 then
-                out[idx] = nil
-            end
-        end
-        if not base and next(fakeE) ~= nil and not UA2.warnedNoBase then
-            UA2.warnedNoBase = true
-            log("Para usar los slots 7-12 necesitas al menos un emote real equipado en los slots 1-6")
-        end
-        return out
-    end
-
-    local function getPopup()
-        if popupInst and popupInst.Frame then
-            return popupInst
-        end
-        if PopupService and type(PopupService.GetPopup) == "function" then
-            local ok, p = pcall(PopupService.GetPopup, PopupService, "Emote")
-            if ok and p then
-                popupInst = p
-                return p
-            end
-        end
-        return nil
-    end
-
-    local function wheelSlotFrame(popup, idx)
-        local wheel = popup.Frame:FindFirstChild(idx <= 6 and "Wheel" or "Wheel2")
-        return wheel and wheel:FindFirstChild("Emote" .. ((idx - 1) % 6 + 1))
-    end
-
-    local function applyOverlay(popup)
-        if not popup or not popup.Frame or type(popup.Emotes) ~= "table" then
-            return
-        end
-        for idx, fid in pairs(fakeE) do
-            if popup.Emotes[idx] then
-                local ok, err = pcall(function()
-                    local sf = wheelSlotFrame(popup, idx)
-                    local item = ItemSvc:GetItemFromID(fid)
-                    ItemSvc:ClearViewport(sf.ViewportFrame)
-                    ItemSvc:CreateViewport(item, sf.ViewportFrame)
-                    sf.TextLabel.Text = ItemSvc:GetName(item)
-                end)
-                if not ok and not warnedOverlay then
-                    warnedOverlay = true
-                    log("Aviso: no se pudo dibujar el visual en la rueda ->", tostring(err))
-                end
-            end
-        end
-    end
-
-    local function refreshWheel()
-        local p = getPopup()
-        if not p or type(p.Emotes) ~= "table" then
-            return
-        end
-        pcall(origSetEquipped, p, augmentEmotes(p.Emotes))
-        applyOverlay(p)
-    end
-
-    local function isLocalEmote(self)
-        local char = self.Character
-        local lc = LP.Character
-        if not char or not lc then
-            return false
-        end
-        if char == lc then
-            return true
-        end
-        local a, b = char:GetAttribute("Tag"), lc:GetAttribute("Tag")
-        return a ~= nil and a == b
-    end
-
-    local function resolveFake(self)
-        local mod = self.EmoteModule
-        local modId = mod and mod:GetAttribute("ID")
-        if not modId then
-            return nil
-        end
-        if pending and tick() - pending.t < 5 then
-            local fid = fakeE[pending.slot]
-            if fid and (realSlotId(pending.slot) == modId or (isExtraSlot(pending.slot) and pending.base == modId)) then
-                pending = nil
-                return fid
-            end
-        end
-        for idx = 1, 12 do
-            local fid = fakeE[idx]
-            if fid and realSlotId(idx) == modId then
-                return fid
-            end
-        end
-        return nil
-    end
-
-    local function swapTo(fid)
-        if type(firesignal) ~= "function" then
-            log("Tu ejecutor no tiene firesignal: no se puede cambiar el emote local")
-            return
-        end
-        local char = LP.Character
-        local tag = char and char:GetAttribute("Tag")
-        if not tag then
-            log("No se encontro el Tag del personaje; no se cambia el emote")
-            return
-        end
-        local ok, err = pcall(function()
-            local tagBuf = buffer.create(2)
-            buffer.writeu16(tagBuf, 0, tag)
-            firesignal(RS.Events.UpdateCharacterDataRegistry.OnClientEvent, {
-                buffer.fromstring("\24\1"),
-                fid,
-                tagBuf,
-            })
-        end)
-        if not ok then
-            log("Fallo el cambio local de emote ->", tostring(err))
-        end
-    end
-
-    local function slotType(slot)
-        if type(slot) ~= "string" or type(origSlotTypeForSlot) ~= "function" then
-            return nil
-        end
-        local ok, st = pcall(origSlotTypeForSlot, slot)
-        if ok and KNOWN[st] then
-            return st
-        end
-        return nil
-    end
-
-    local function collectEmoteIds()
-        local raw, seen = {}, {}
-        local items = RS:FindFirstChild("Items")
-        local function walk(parent)
-            for _, child in ipairs(parent:GetChildren()) do
-                if child:IsA("Folder") then
-                    if child.Name == "Emotes" then
-                        for _, e in ipairs(child:GetChildren()) do
-                            if e:IsA("ModuleScript") then
-                                local id = e:GetAttribute("ID")
-                                if type(id) == "number" and not seen[id] then
-                                    seen[id] = true
-                                    raw[#raw + 1] = id
-                                end
-                            end
-                        end
-                    else
-                        walk(child)
-                    end
-                end
-            end
-        end
-        if items then
-            walk(items)
-        end
-
-        local filtered = {}
-        for _, id in ipairs(raw) do
-            local okSlot, st = pcall(ItemSlotType, id)
-            local okReg, entry = pcall(Registry.GetById, id)
-            if okSlot and st == "Emote" and okReg and entry and entry.Module then
-                filtered[#filtered + 1] = id
-            end
-        end
-        if #filtered == 0 and #raw > 0 then
-            log("Aviso: el filtro por slot 'Emote' dejo 0; se usa la lista sin filtrar (", #raw, ")")
-            filtered = raw
-        end
-        table.sort(filtered)
-        return filtered, #raw
-    end
-
-    local function collectCosmetics()
-        local okAll, all = pcall(Registry.GetAll)
-        if not okAll or type(all) ~= "table" then
-            return nil
-        end
-        local bytype = emptyByType()
-        local typeOf = {}
-        local n = 0
-        for id in pairs(all) do
-            n = n + 1
-            if n % 150 == 0 then
-                task.wait()
-            end
-            if type(id) == "number" then
-                local ok, st = pcall(ItemSlotType, id)
-                if ok and KNOWN[st] then
-                    local list = bytype[st]
-                    list[#list + 1] = id
-                    typeOf[id] = st
-                end
-            end
-        end
-        for _, list in pairs(bytype) do
-            table.sort(list)
-        end
-        return bytype, typeOf, n
-    end
-
-    local function collectSkins()
-        local okAll, all = pcall(Registry.GetAll)
-        if not okAll or type(all) ~= "table" then
-            return {}, {}
-        end
-        local list, set, n = {}, {}, 0
-        for id in pairs(all) do
-            n = n + 1
-            if n % 150 == 0 then
-                task.wait()
-            end
-            if type(id) == "number" then
-                local ok, isSkin = pcall(function()
-                    local entry = Registry.GetById(id)
-                    local original = entry and entry.Module and entry.Module:FindFirstChild("Original")
-                    return original ~= nil and original:IsA("ObjectValue") and original.Value ~= nil
-                end)
-                if ok and isSkin then
-                    list[#list + 1] = id
-                    set[id] = true
-                end
-            end
-        end
-        table.sort(list)
-        return list, set
-    end
-
-    local function substitutePerks(value)
-        if type(value) ~= "table" or not (INGAME.Perk and ENABLED.Perk) then
-            return value
-        end
-        local removed, any = {}, false
-        for slot in pairs(fakeC) do
-            if slotType(slot) == "Perk" then
-                any = true
-                local okR, rid = pcall(origGetFromSlot, slot)
-                if okR and type(rid) == "number" and rid ~= 0 then
-                    removed[rid] = true
-                end
-            end
-        end
-        if not any then
-            return value
-        end
-        local out, seen = {}, {}
-        for _, id in ipairs(value) do
-            if not removed[id] then
-                out[#out + 1] = id
-                seen[id] = true
-            end
-        end
-        for slot, fid in pairs(fakeC) do
-            if slotType(slot) == "Perk" and not seen[fid] then
-                out[#out + 1] = fid
-                seen[fid] = true
-            end
-        end
-        return out
-    end
-
-    local function substituteSkins(value)
-        if not UA2.skinOn or next(fakeS) == nil then
-            return value
-        end
-        if type(value) ~= "table" then
-            value = {}
-        end
-        local removed = {}
-        for item in pairs(fakeS) do
-            local okO, realOrig = pcall(function() return UA2.origGetSkin(item) end)
-            if okO and type(realOrig) == "number" then
-                removed[realOrig] = true
-            end
-        end
-        local out, seen = {}, {}
-        for _, id in ipairs(value) do
-            if not removed[id] then
-                out[#out + 1] = id
-                seen[id] = true
-            end
-        end
-        for _, sid in pairs(fakeS) do
-            if not seen[sid] then
-                out[#out + 1] = sid
-                seen[sid] = true
-            end
-        end
-        return out
-    end
-
-    local function substituteNametag(value)
-        local fid = fakeC["NametagSlot"]
-        if type(fid) == "number" and INGAME.Nametag and ENABLED.Nametag then
-            return fid
-        end
-        return value
-    end
-
-    local function applyPatches()
-
-        patch("useInventory.GetOwnedBySlotType", Inventory, "GetOwnedBySlotType", function(orig)
-            return function(st, ...)
-                local list = orig(st, ...)
-                if type(list) ~= "table" then
-                    return list
-                end
-                local extra
-                if st == "Emote" then
-                    if not emoteOn then
-                        return list
-                    end
-                    extra = ALL
-                elseif cosOn and ENABLED[st] then
-                    extra = BYTYPE[st]
-                else
-                    return list
-                end
-                local have = {}
-                for _, id in ipairs(list) do
-                    have[id] = true
-                end
-                local out = table.clone(list)
-                for _, id in ipairs(extra) do
-                    if not have[id] then
-                        out[#out + 1] = id
-                    end
-                end
-                return out
-            end
-        end)
-
-        patchBoth("Equip", "Equip", function(orig)
-            return function(slot, id, ...)
-                local idx = emoteOn and slotIndex(slot) or nil
-                if idx and isExtraSlot(idx) then
-
-                    if type(id) == "number" and id ~= 0 then
-                        fakeE[idx] = id
-                        log("Slot extra", idx, "-> emote visual", id)
-                    else
-                        fakeE[idx] = nil
-                    end
-                    refreshWheel()
-                    pcall(function() Loadout.Changed:Fire() end)
-                    return
-                end
-                if idx then
-                    if type(id) == "number" and id ~= 0 then
-                        if ALLSET[id] and not owns(id) then
-                            if realSlotId(idx) == 0 then
-                                local base = pickBase()
-                                if not base then
-                                    log("No tienes ningun emote real para usar de base en el slot", idx)
-                                    return
-                                end
-                                log("Slot", idx, "vacio: se equipa el emote real base", base)
-                                orig(slot, base)
-                            end
-                            fakeE[idx] = id
-                            log("Slot", idx, "-> emote visual", id)
-                            refreshWheel()
-                            return
-                        end
-                        local had = fakeE[idx] ~= nil
-                        fakeE[idx] = nil
-                        local r = orig(slot, id, ...)
-                        if had then
-                            refreshWheel()
-                        end
-                        return r
-                    end
-                    if id == nil or id == 0 then
-                        fakeE[idx] = nil
-                    end
-                    return orig(slot, id, ...)
-                end
-
-                local st = cosOn and slotType(slot) or nil
-                if st and ENABLED[st] then
-                    if type(id) == "number" and id ~= 0 then
-                        if TYPE_OF[id] == st and not owns(id) then
-                            fakeC[slot] = id
-                            log("Slot", slot, "-> visual", id)
-                            return
-                        end
-                        fakeC[slot] = nil
-                        return orig(slot, id, ...)
-                    end
-                    if (id == nil or id == 0) and fakeC[slot] ~= nil then
-                        fakeC[slot] = nil
-                        log("Slot", slot, "-> visual quitado")
-                        return
-                    end
-                end
-                return orig(slot, id, ...)
-            end
-        end)
-
-        patchBoth("Unequip", "Unequip", function(orig)
-            return function(slot, ...)
-                if cosOn and fakeC[slot] ~= nil then
-                    fakeC[slot] = nil
-                    log("Slot", slot, "-> visual quitado")
-                    return
-                end
-                local idx = emoteOn and slotIndex(slot) or nil
-                if idx and isExtraSlot(idx) then
-                    fakeE[idx] = nil
-                    refreshWheel()
-                    pcall(function() Loadout.Changed:Fire() end)
-                    return
-                end
-                local had = idx and fakeE[idx] ~= nil
-                if idx then
-                    fakeE[idx] = nil
-                end
-                local r = orig(slot, ...)
-                if had then
-                    refreshWheel()
-                end
-                return r
-            end
-        end)
-
-        local function buildEquippedMap(orig)
-            return function(...)
-                local real = orig(...)
-                if type(real) ~= "table" or (next(fakeE) == nil and next(fakeC) == nil) then
-                    return real
-                end
-                local out = table.clone(real)
-                for idx, fid in pairs(fakeE) do
-                    local name = "EmoteSlot_" .. idx
-                    if out[name] or isExtraSlot(idx) then
-                        out[name] = fid
-                    end
-                end
-                for slot, fid in pairs(fakeC) do
-                    out[slot] = fid
-                end
-                return table.freeze(out)
-            end
-        end
-        patch("useLoadout.GetAll", Loadout, "GetAll", buildEquippedMap)
-        patch("useInventory.GetLoadout", Inventory, "GetLoadout", buildEquippedMap)
-
-        patchBoth("IsEquipped", "IsEquipped", function(orig)
-            return function(id)
-                local eq, s = orig(id)
-                if eq then
-                    return eq, s
-                end
-                for idx, fid in pairs(fakeE) do
-                    if fid == id then
-                        return true, "EmoteSlot_" .. idx
-                    end
-                end
-                for slot, fid in pairs(fakeC) do
-                    if fid == id then
-                        return true, slot
-                    end
-                end
-                return false, nil
-            end
-        end)
-
-        if emoteOn then
-
-            patch("EmotePopup.SetEquipped", EmotePopup, "SetEquipped", function(orig)
-                return function(self, list, ...)
-                    local r = orig(self, augmentEmotes(list), ...)
-                    popupInst = self
-                    applyOverlay(self)
-                    return r
-                end
-            end)
-
-            patch("EmotePopup.Show", EmotePopup, "Show", function(orig)
-                return function(self, ...)
-                    local r = orig(self, ...)
-                    popupInst = self
-                    applyOverlay(self)
-                    return r
-                end
-            end)
-
-            patch("EmotePopup.KeyActivated", EmotePopup, "KeyActivated", function(orig)
-                return function(self, slot, ...)
-                    if type(slot) == "number" then
-                        pending = { slot = slot, t = tick(), base = type(self.Emotes) == "table" and self.Emotes[slot] or nil }
-                    end
-                    return orig(self, slot, ...)
-                end
-            end)
-
-            patch("Emote.Activate", EmoteClass, "Activate", function(orig)
-                return function(self, preview, p3)
-                    local fid = nil
-                    if not preview then
-                        pcall(function()
-                            if isLocalEmote(self) then
-                                fid = resolveFake(self)
-                            end
-                        end)
-                    end
-                    if fid then
-                        task.defer(swapTo, fid)
-                    end
-                    return orig(self, preview, p3)
-                end
-            end)
-        end
-
-        if UA2.slotsOn and PackageMod then
-            patch("UserOwnsPackage.Owns (MoreEmotes)", PackageMod, "Owns", function(orig)
-                return function(player, package, ...)
-                    if package == "MoreEmotes" and player == LP and UA2.slotsOn then
-                        return true
-                    end
-                    return orig(player, package, ...)
-                end
-            end)
-        end
-
-        local boomboxOn = cosOn and ENABLED.Boombox and #BYTYPE.Boombox > 0
-        if SlotsView and (UA2.slotsOn or boomboxOn) then
-            patch("Inventario.Slots.SetHeader (12 emotes + boombox)", SlotsView, "SetHeader", function(orig)
-                return function(self, ...)
-                    if UA2.slotsOn then
-                        self.MoreEmotes = true
-                    end
-                    if cosOn and ENABLED.Boombox and #BYTYPE.Boombox > 0 then
-                        self.OwnsRelics = true
-                    end
-                    return orig(self, ...)
-                end
-            end)
-        end
-
-        if boomboxOn then
-            patchBoth("GetEquipped (boombox)", "GetEquipped", function(orig)
-                return function(slot, ...)
-                    if slot == "BoomboxSlot" and fakeC.BoomboxSlot ~= nil then
-                        return fakeC.BoomboxSlot
-                    end
-                    return orig(slot, ...)
-                end
-            end)
-        end
-
-        if UA2.skinOn then
-            patch("useInventory.OwnedIds (skins)", Inventory, "OwnedIds", function(orig)
-                return function(...)
-                    local list = orig(...)
-                    if not UA2.skinOn or type(list) ~= "table" then
-                        return list
-                    end
-                    local have = {}
-                    for _, id in ipairs(list) do
-                        have[id] = true
-                    end
-                    local out = table.clone(list)
-                    for _, id in ipairs(UA2.SKINS) do
-                        if not have[id] then
-                            out[#out + 1] = id
-                        end
-                    end
-                    table.sort(out)
-                    return out
-                end
-            end)
-            patch("useInventory.GetSkin", Inventory, "GetSkin", function(orig)
-                return function(item, ...)
-                    if UA2.skinOn and fakeS[item] ~= nil then
-                        return fakeS[item]
-                    end
-                    return orig(item, ...)
-                end
-            end)
-
-            if DataRegClass then
-                patch("DataRegistry.Get (skins de herramientas)", DataRegClass, "Get", function(orig)
-                    return function(self, term, ...)
-                        local value = orig(self, term, ...)
-                        if term == "ToolSkins" and UA2.skinOn and next(fakeS) ~= nil then
-                            local okL, isLocal = pcall(function()
-                                return self.Parent ~= nil and self.Parent.Local == true
-                            end)
-                            if okL and isLocal then
-                                local okS, res = pcall(substituteSkins, value)
-                                if okS and res ~= nil then
-                                    return res
-                                end
-                            end
-                        end
-                        return value
-                    end
-                end)
-            end
-            patch("useInventory.SetSkin", Inventory, "SetSkin", function(orig)
-                return function(item, skin, ...)
-                    if UA2.skinOn then
-                        if type(skin) == "number" and skin ~= 0 and UA2.SKINSET[skin] and not owns(skin) then
-                            fakeS[item] = skin
-                            log("Skin visual:", item, "->", skin)
-                            pcall(function() Inventory.Changed:Fire() end)
-                            return
-                        end
-                        if fakeS[item] ~= nil then
-                            fakeS[item] = nil
-                            pcall(function() Inventory.Changed:Fire() end)
-                        end
-                    end
-                    return orig(item, skin, ...)
-                end
-            end)
-        end
-
-        if cosOn then
-
-            if RigClass then
-                patch("Rig.BuildRig (partida)", RigClass, "BuildRig", function(orig)
-                    return function(self, ...)
-                        if not self.Built
-                            and type(self.Cosmetics) == "table"
-                            and self.RigTerm and self.Actions and self.ToolSkins and self.Boombox
-                            and next(fakeC) ~= nil
-                        then
-                            local isLocal = false
-                            pcall(function()
-                                isLocal = self.Parent ~= nil and self.Parent.Local == true
-                            end)
-                            if isLocal then
-                                local ok, err = pcall(function()
-                                    local real = self.Cosmetics
-                                    local removed = {}
-                                    for slot in pairs(fakeC) do
-
-                                        if slot ~= "BoomboxSlot" then
-                                            local okR, rid = pcall(origGetFromSlot, slot)
-                                            if okR and type(rid) == "number" and rid ~= 0 then
-                                                removed[rid] = true
-                                            end
-                                        end
-                                    end
-                                    local out, seen = {}, {}
-                                    for _, id in ipairs(real) do
-                                        if not removed[id] then
-                                            out[#out + 1] = id
-                                            seen[id] = true
-                                        end
-                                    end
-                                    for slot, fid in pairs(fakeC) do
-                                        if slot ~= "BoomboxSlot" and not seen[fid] then
-                                            out[#out + 1] = fid
-                                            seen[fid] = true
-                                        end
-                                    end
-
-                                    local bid = fakeC.BoomboxSlot
-                                    if type(bid) == "number" and INGAME.Boombox and ENABLED.Boombox then
-                                        self.Boombox = bid
-                                    end
-                                    table.clear(lastBuild)
-                                    lastBuild.Real = table.clone(real)
-                                    lastBuild.Fake = table.clone(fakeC)
-                                    lastBuild.Final = table.clone(out)
-                                    self.Cosmetics = out
-                                    log(
-                                        "BuildRig local: real = {" .. table.concat(real, ",") .. "}",
-                                        "| final = {" .. table.concat(out, ",") .. "}"
-                                    )
-                                end)
-                                if not ok then
-                                    log("Fallo al cambiar Cosmetics en BuildRig ->", tostring(err))
-                                end
-                            end
-                        end
-                        return orig(self, ...)
-                    end
-                end)
-            else
-                log("PARCHE NO APLICADO (no se pudo cargar Objects.Game.Character.Rig): cosmeticos en partida no funcionan")
-                patchResults[#patchResults + 1] = { label = "Rig.BuildRig (partida)", ok = false }
-            end
-
-            if DataRegClass then
-                patch("DataRegistry.SetTerm (ventajas/etiqueta)", DataRegClass, "SetTerm", function(orig)
-                    return function(self, term, value, ...)
-                        if (term == "Perks" or term == "Nametag" or term == "Boombox") and next(fakeC) ~= nil then
-                            local ok, res = pcall(function()
-                                if self.Parent == nil or self.Parent.Local ~= true then
-                                    return value
-                                end
-                                if term == "Perks" then
-                                    return substitutePerks(value)
-                                end
-                                if term == "Boombox" then
-                                    local fid = fakeC.BoomboxSlot
-                                    if type(fid) == "number" and INGAME.Boombox and ENABLED.Boombox then
-                                        return fid
-                                    end
-                                    return value
-                                end
-                                return substituteNametag(value)
-                            end)
-                            if ok and res ~= nil and res ~= value then
-                                log("En partida:", term, "->", type(res) == "table" and ("{" .. table.concat(res, ",") .. "}") or tostring(res))
-                                value = res
-                            end
-                        end
-                        return orig(self, term, value, ...)
-                    end
-                end)
-            else
-                log("PARCHE NO APLICADO (no se pudo cargar Objects.Game.Character.DataRegistry): ventajas/etiqueta en partida no funcionan")
-                patchResults[#patchResults + 1] = { label = "DataRegistry.SetTerm (ventajas/etiqueta)", ok = false }
-            end
-        end
-    end
-
-    local SHOP_MODE = "B"
-    local origTierProgress
-
-    local lastShopNotify = 0
-    local function shopNotify(es, en)
-        if os.clock() - lastShopNotify < 4 then
-            return
-        end
-        lastShopNotify = os.clock()
-        pcall(function()
-            local tr = (type(getgenv) == "function" and getgenv().HydraScriptText) or nil
-            StarterGui:SetCore("SendNotification", {
-                Title = tr and tr("Tienda de evento", "Event shop") or "Tienda de evento",
-                Text = tr and tr(es, en) or es,
-                Duration = 4,
-            })
-        end)
-    end
-
-    local function applyShopPatches()
-        if not (EventSvc and ShopsSvc) then
-            log("Tienda de evento: falta UserData.Event o UserData.Shops, parches omitidos")
-            return
-        end
-        origTierProgress = EventSvc.GetTierProgress
-
-        local okBuy = patch("useShops.Purchase (no manda compras de tiers bloqueados)", ShopsSvc, "Purchase", function(orig)
-            return function(id, ...)
-                local n = tonumber(id)
-                if n and type(origTierProgress) == "function" then
-                    local ok, tiers = pcall(origTierProgress)
-                    if ok and type(tiers) == "table" then
-                        for _, t in ipairs(tiers) do
-                            if t.status == "Locked" then
-                                for _, it in ipairs(t.items or {}) do
-                                    if it.itemId == n then
-                                        log("Tienda de evento: item", n, "esta en un tier bloqueado de verdad -> no se manda la compra")
-                                        shopNotify("Solo visual: ese tier sigue bloqueado y no se puede comprar", "Visual only: that tier is still locked and cannot be bought")
-                                        return false
-                                    end
-                                end
-                            end
-                        end
-                    end
-                end
-                return orig(id, ...)
-            end
-        end)
-        if not okBuy then
-            log("Tienda de evento: no se aplico el bloqueo de compra, asi que tampoco se cambia lo que se muestra")
-            return
-        end
-
-        patch("useEvent.GetTiers (candado visual)", EventSvc, "GetTiers", function(orig)
-            return function(...)
-                local real = orig(...)
-                if type(real) ~= "table" then
-                    return real
-                end
-                local out = {}
-                for i, t in ipairs(real) do
-                    local c = t
-                    if type(t) == "table" and t.State == "Locked" then
-                        if SHOP_MODE == "B" then
-                            c = table.clone(t)
-                            c.State = "Unlocked"
-                            c.IsTimeOpen = true
-                            c.IsWaitingOnTimer = false
-                            c.ItemsMet = true
-                            c.UnlockProgress = nil
-                        elseif t.IsWaitingOnTimer then
-                            c = table.clone(t)
-                            c.IsTimeOpen = true
-                            c.IsWaitingOnTimer = false
-                            if t.ItemsMet then
-                                c.State = "Unlocked"
-                            end
-                        end
-                    end
-                    out[i] = c
-                end
-                return out
-            end
-        end)
-    end
-
-    function M.Disable()
-        gen = gen + 1
-        if not active then
-            return
-        end
-        for i = #patches, 1, -1 do
-            local p = patches[i]
-            pcall(function()
-                p.tbl[p.key] = p.orig
-            end)
-        end
-        patches = {}
-        table.clear(fakeE)
-        table.clear(fakeC)
-        table.clear(fakeS)
-        table.clear(lastBuild)
-        pending = nil
-        emoteOn, cosOn = false, false
-        UA2.skinOn, UA2.slotsOn = false, false
-        pcall(function() Inventory.Changed:Fire() end)
-        pcall(function() Loadout.Changed:Fire() end)
-        active = false
-        refreshWheel()
-        log("Descargado: todo restaurado")
-    end
-
-    local function enableImpl(myGen)
-
-        for _, name in ipairs({}) do
-            local ok, t = pcall(function()
-                return GENV[name]
-            end)
-            if ok and type(t) == "table" and type(t.Unload) == "function" then
-                pcall(t.Unload)
-                log("Se descargo el script de prueba suelto:", name)
-            end
-        end
-
-        Registry = req("Items.Registry", "Items", "Registry")
-        Inventory = req("useInventory", "Client", "Services", "UserData", "Inventory")
-        Loadout = req("useLoadout", "Client", "Services", "UserData", "Inventory", "Loadout")
-        if not (Registry and Inventory and Loadout) then
-            log("ABORTADO: falta al menos un modulo necesario. No se aplico ningun parche.")
-            return
-        end
-
-        ItemSlotType = Inventory.GetItemSlotType
-        do
-            local matched, checked, emoteBad = 0, 0, 0
-            local okAll, equipped = pcall(Loadout.GetAll)
-            if type(ItemSlotType) == "function" and okAll and type(equipped) == "table" then
-                for slot, id in pairs(equipped) do
-                    if type(id) == "number" and id ~= 0 then
-                        local okI, got = pcall(ItemSlotType, id)
-                        local okS, want = pcall(Loadout.GetSlotType, slot)
-                        if okI and okS and want ~= nil then
-                            checked = checked + 1
-                            if got == want then
-                                matched = matched + 1
-                            elseif want == "Emote" then
-                                emoteBad = emoteBad + 1
-                            end
-                        end
-                    end
-                end
-            end
-            if matched == 0 or emoteBad > 0 then
-                log("ABORTADO: GetItemSlotType no coincide con tu loadout (coinciden " .. matched .. " de " .. checked .. ", emotes mal: " .. emoteBad .. "). No se aplico ningun parche.")
-                return
-            end
-            log("GetItemSlotType verificado contra tu loadout:", matched, "de", checked, "slots")
-        end
-        RigClass = req("Objects.Game.Character.Rig", "Objects", "Game", "Character", "Rig")
-        DataRegClass = req("Objects.Game.Character.DataRegistry", "Objects", "Game", "Character", "DataRegistry")
-        PopupService = req("PopupService", "Services", "UI", "PopupService")
-        EmotePopup = req("PopupService.Types.Emote", "Services", "UI", "PopupService", "Types", "Emote")
-        EmoteClass = req("Objects.Items.Emote", "Objects", "Items", "Emote")
-        ItemSvc = req("ClientItemService", "Services", "Items", "ClientItemService")
-        PackageMod = req("UserOwnsPackage", "Shared", "Marketplace", "UserOwnsPackage")
-        SlotsView = req("Menu.Inventory.Slots", "Objects", "Menu", "Menu", "Views", "Inventory", "Views", "Slots")
-        EventSvc = req("useEvent", "Client", "Services", "UserData", "Event")
-        ShopsSvc = req("useShops", "Client", "Services", "UserData", "Shops")
-        local emoteMods = (EmotePopup and EmoteClass and ItemSvc) and true or false
-        if not emoteMods then
-            log("Aviso: faltan modulos de emotes; Unlock All se aplica solo a cosmeticos/personajes/auras")
-        end
-
-        local newAll, newAllSet, rawCount = {}, {}, 0
-        if emoteMods then
-            newAll, rawCount = collectEmoteIds()
-            for _, id in ipairs(newAll) do
-                newAllSet[id] = true
-            end
-            log("Emotes encontrados:", rawCount, "| validos:", #newAll)
-        end
-
-        local newBy, newTypeOf, regCount = collectCosmetics()
-        local newSkins, newSkinSet = collectSkins()
-
-        local extraLocked = false
-        if PackageMod then
-            local okOwn, owned = pcall(PackageMod.Owns, LP, "MoreEmotes")
-            extraLocked = not (okOwn and owned == true)
-        end
-        if myGen ~= gen then
-            return
-        end
-        if active then
-            return
-        end
-        if not newBy then
-            log("Aviso: Registry.GetAll no devolvio una tabla; cosmeticos/personajes/auras desactivados")
-            newBy = emptyByType()
-            newTypeOf = {}
-            regCount = 0
-        end
-        local cosTotal = 0
-        local counts = {}
-        for _, n in ipairs(TYPE_NAMES) do
-            cosTotal = cosTotal + #newBy[n]
-            counts[#counts + 1] = n .. ": " .. #newBy[n]
-        end
-        log("Items en Registry:", regCount, "|", table.concat(counts, " | "))
-
-        log("Skins de herramientas:", #newSkins, "| Emote slots 7-12:", extraLocked and "bloqueados (se desbloquean visuales)" or "ya comprados")
-
-        if #newAll == 0 and cosTotal == 0 and #newSkins == 0 then
-            log("ABORTADO: no se encontro ningun emote ni cosmetico. No se aplico ningun parche.")
-            return
-        end
-
-        ALL, ALLSET = newAll, newAllSet
-        BYTYPE, TYPE_OF = newBy, newTypeOf
-        emoteOn = emoteMods and #newAll > 0
-        cosOn = cosTotal > 0
-        UA2.SKINS, UA2.SKINSET = newSkins, newSkinSet
-        UA2.skinItem = nil
-        UA2.skinOn = #newSkins > 0
-        UA2.extraLocked = extraLocked
-        UA2.slotsOn = emoteOn and extraLocked
-        UA2.warnedNoBase = false
-        table.clear(fakeS)
-        patches, patchResults = {}, {}
-        table.clear(fakeE)
-        table.clear(fakeC)
-        pending = nil
-        popupInst = nil
-        warnedOverlay = false
-
-        origGetOwned = Inventory.GetOwnedBySlotType
-        origOwns = Inventory.Owns
-        origIsEquipped = Loadout.IsEquipped
-        origGetFromSlot = Loadout.GetEquipped
-        origSlotTypeForSlot = Loadout.GetSlotType
-        origSetEquipped = EmotePopup and EmotePopup.SetEquipped or nil
-        UA2.origGetSkin = Inventory.GetSkin
-
-        applyPatches()
-        applyShopPatches()
-        active = true
-
-        if UA2.skinOn then
-            task.spawn(function()
-                local deploySvc = req("DeployableService", "Services", "Items", "DeployableService")
-                if not deploySvc or not active or myGen ~= gen or not UA2.skinOn then
-                    return
-                end
-                patch("DeployableService.Build (skins de colocables)", deploySvc, "Build", function(orig)
-                    return function(self, model, ...)
-                        if UA2.skinOn and next(fakeS) ~= nil and typeof(model) == "Instance" then
-                            pcall(function()
-                                local owner = model:GetAttribute("Owner")
-                                local mine = owner ~= nil and (owner == LP.Name or owner == LP.DisplayName or owner == LP.UserId)
-                                if not UA2.loggedOwner then
-                                    UA2.loggedOwner = true
-                                    log("Colocable", model.Name, "Owner =", tostring(owner), mine and "(tuyo)" or "(de otro)")
-                                end
-                                if not mine then
-                                    return
-                                end
-                                for item, sid in pairs(fakeS) do
-                                    local entry = Registry.GetById(item)
-                                    if entry and entry.Module and entry.Module.Name == model.Name then
-                                        model:SetAttribute("Skin", sid)
-                                        log("Colocable", model.Name, "-> skin visual", sid)
-                                    end
-                                end
-                            end)
-                        end
-                        return orig(self, model, ...)
-                    end
-                end)
-            end)
-        end
-        pcall(function() Inventory.Changed:Fire() end)
-        pcall(function() Loadout.Changed:Fire() end)
-        refreshWheel()
-
-        local okCount = 0
-        for _, r in ipairs(patchResults) do
-            if r.ok then
-                okCount = okCount + 1
-            end
-        end
-        log("Listo:", okCount .. "/" .. #patchResults, "parches aplicados")
-        if okCount < #patchResults then
-            log("Algun parche fallo")
-        end
-        pcall(function()
-            StarterGui:SetCore("SendNotification", {
-                Title = "Unlock All",
-                Text = okCount .. "/" .. #patchResults .. ((type(getgenv) == "function" and getgenv().HydraScriptText) and getgenv().HydraScriptText(" parches aplicados", " patches applied") or " parches aplicados"),
-                Duration = 5,
-            })
-        end)
-    end
-
-    function M.Enable()
-        if active then
-            return
-        end
-        gen = gen + 1
-        local myGen = gen
-        task.spawn(function()
-            local ok, err = pcall(enableImpl, myGen)
-            if not ok then
-                log("FALLO Enable ->", tostring(err))
-            end
-        end)
-    end
-
-    function M.IsEnabled()
-        return active
-    end
-
-    function M.Status()
-        log("---- ESTADO ---- activo:", tostring(active), "| emotes:", tostring(emoteOn), "| cosmeticos:", tostring(cosOn))
-        for _, r in ipairs(patchResults) do
-            log(r.ok and "OK     " or "FALLO  ", r.label)
-        end
-        for st in pairs(KNOWN) do
-            log("Tipo", st, ENABLED[st] and "activo" or "desactivado", "| items:", #BYTYPE[st])
-        end
-        local any = false
-        for idx = 1, 12 do
-            if fakeE[idx] then
-                any = true
-                log("Emote slot", idx, "real:", realSlotId(idx), "| visual:", fakeE[idx])
-            end
-        end
-        for slot, fid in pairs(fakeC) do
-            any = true
-            local okReal, real = pcall(Loadout.GetEquipped, slot)
-            log("Slot", slot, "real:", okReal and real or "?", "| visual:", fid)
-        end
-        for item, sid in pairs(fakeS) do
-            any = true
-            log("Skin de", item, "-> visual", sid)
-        end
-        log("Skins disponibles:", #UA2.SKINS, "| slots 7-12:", UA2.slotsOn and "visuales" or (UA2.extraLocked and "bloqueados" or "comprados"))
-        if not any then
-            log("Sin slots visuales activos")
-        end
-    end
-
-    function M.SetType(name, state)
-        if not KNOWN[name] then
-            log("Tipo desconocido:", tostring(name), "(usa " .. table.concat(TYPE_NAMES, ", ") .. ")")
-            return
-        end
-        ENABLED[name] = state and true or false
-        if not ENABLED[name] then
-            for slot in pairs(fakeC) do
-                if slotType(slot) == name then
-                    fakeC[slot] = nil
-                end
-            end
-        end
-        log("Tipo", name, ENABLED[name] and "activado" or "desactivado", "(se aplica la proxima vez que abras el selector)")
-    end
-
-    function M.GetBoomboxSkins()
-        local out, seen = {}, {}
-        for _, id in ipairs(BYTYPE.Boombox or {}) do
-            local name = tostring(id)
-            pcall(function()
-                local entry = Registry.GetById(id)
-                local ok, info = pcall(require, entry.Module)
-                name = (ok and type(info) == "table" and info.AppearanceInfo and info.AppearanceInfo.Name) or entry.Module.Name
-            end)
-            seen[id] = true
-            out[#out + 1] = { id = id, name = name, ugc = false }
-        end
-        pcall(function()
-            for _, tagged in ipairs(game:GetService("CollectionService"):GetTagged("RelicsUGCSkin")) do
-                local id = tagged:GetAttribute("ID")
-                if type(id) == "number" and not seen[id] then
-                    seen[id] = true
-                    local display = tagged:GetAttribute("DisplayName")
-                    out[#out + 1] = { id = id, name = type(display) == "string" and display or tagged.Name, ugc = true }
-                end
-            end
-        end)
-        return out
-    end
-
-    function M.GetBoombox()
-        return fakeC.BoomboxSlot
-    end
-
-    function M.SetBoombox(id)
-        if not active then
-            log("Activa Unlock All primero")
-            return false
-        end
-        fakeC.BoomboxSlot = type(id) == "number" and id or nil
-        log("Boombox visual ->", tostring(fakeC.BoomboxSlot))
-        pcall(function() Loadout.Changed:Fire() end)
-        return true
-    end
-
-    function M.Snapshot()
-        local snap = { emotes = {}, cosmetics = {}, skins = {} }
-        for idx, fid in pairs(fakeE) do snap.emotes[tostring(idx)] = fid end
-        for slot, fid in pairs(fakeC) do snap.cosmetics[slot] = fid end
-        for item, sid in pairs(fakeS) do snap.skins[tostring(item)] = sid end
-        return snap
-    end
-
-    function M.ApplySnapshot(snap)
-        if not active or type(snap) ~= "table" then
-            return false
-        end
-        table.clear(fakeE)
-        table.clear(fakeC)
-        table.clear(fakeS)
-        local skipped = 0
-        for idx, fid in pairs(snap.emotes or {}) do
-            local n = tonumber(idx)
-            if not (n and n >= 1 and n <= 12 and ALLSET[fid]) or (n > 6 and UA2.extraLocked and not UA2.slotsOn) then
-                skipped += 1
-            elseif n <= 6 and realSlotId(n) == 0 then
-
-                local okE = pcall(Loadout.Equip, "EmoteSlot_" .. n, fid)
-                if not okE then skipped += 1 end
-                task.wait(0.3)
-            else
-                fakeE[n] = fid
-            end
-        end
-        for slot, fid in pairs(snap.cosmetics or {}) do
-            local st = slotType(slot)
-            local isUgcBoombox = slot == "BoomboxSlot" and type(fid) == "number" and ENABLED.Boombox
-            if (st and TYPE_OF[fid] == st) or isUgcBoombox then fakeC[slot] = fid else skipped += 1 end
-        end
-        for item, sid in pairs(snap.skins or {}) do
-            local n = tonumber(item)
-            if n and UA2.SKINSET[sid] then fakeS[n] = sid else skipped += 1 end
-        end
-        refreshWheel()
-        pcall(function() Loadout.Changed:Fire() end)
-        pcall(function() Inventory.Changed:Fire() end)
-        log("Perfil aplicado", skipped > 0 and ("(" .. skipped .. " items ya no existen)") or "")
-        return true, skipped
-    end
-
-    function M.Pools()
-        return { emotes = ALL, bytype = BYTYPE, skins = UA2.SKINS }
-    end
-
-    function M.RandomLook()
-        if not active then
-            log("Activa Unlock All primero")
-            return nil
-        end
-        local function pick(list)
-            if type(list) == "table" and #list > 0 then
-                return list[math.random(1, #list)]
-            end
-            return nil
-        end
-        local snap = { emotes = {}, cosmetics = {}, skins = {} }
-        if emoteOn and #ALL > 0 then
-            local maxSlot = (UA2.extraLocked and not UA2.slotsOn) and 6 or 12
-            local pool = table.clone(ALL)
-            for idx = 1, maxSlot do
-                if #pool == 0 then
-                    break
-                end
-                local k = math.random(1, #pool)
-                snap.emotes[tostring(idx)] = pool[k]
-                pool[k] = pool[#pool]
-                pool[#pool] = nil
-            end
-        end
-        if cosOn then
-            local used = {}
-            for _, slot in ipairs({ "CosmeticSlot_1", "CosmeticSlot_2", "CharacterSlot", "UnusualSlot", "CarryAnimationSlot", "NametagSlot" }) do
-                local st = slotType(slot)
-                if st and ENABLED[st] then
-                    for _ = 1, 4 do
-                        local id = pick(BYTYPE[st])
-                        if id and not used[id] then
-                            used[id] = true
-                            snap.cosmetics[slot] = id
-                            break
-                        end
-                    end
-                end
-            end
-            if ENABLED.Boombox then
-                local b = pick(M.GetBoomboxSkins())
-                if b then
-                    snap.cosmetics.BoomboxSlot = b.id
-                end
-            end
-        end
-        if UA2.skinOn and #UA2.SKINS > 0 then
-            if not UA2.skinItem then
-
-                local map = {}
-                for _, sid in ipairs(UA2.SKINS) do
-                    local ok, item = pcall(function()
-                        return Registry.GetById(sid).Module.Original.Value:GetAttribute("ID")
-                    end)
-                    if ok and type(item) == "number" then
-                        map[item] = map[item] or {}
-                        table.insert(map[item], sid)
-                    end
-                end
-                UA2.skinItem = map
-            end
-            for item, list in pairs(UA2.skinItem) do
-                snap.skins[tostring(item)] = pick(list)
-            end
-        end
-        return snap
-    end
-
-    function M.SetInGame(name, state)
-        if INGAME[name] == nil then
-            log("Solo se puede para Perk, Nametag o Boombox")
-            return
-        end
-        INGAME[name] = state and true or false
-        log("En partida:", name, INGAME[name] and "activado" or "desactivado", "(aplica en la proxima actualizacion del servidor)")
-    end
-
-    return M
-end)()
-end
-local UA = getgenv().HydraUnlockAll
-local Unlock = {LOOK_FILE = "Hydra_Look.json", AutoLook = true, Waiting = 0}
-function Unlock.saveLook()
-    if type(writefile) ~= "function" or not UA then return false end
-    local ok = pcall(function()
-        writefile(Unlock.LOOK_FILE, game:GetService("HttpService"):JSONEncode(UA.Snapshot()))
-    end)
-    return ok
-end
-function Unlock.loadLook()
-    if type(readfile) ~= "function" or type(isfile) ~= "function" or not UA then return false end
-    local ok, snap = pcall(function()
-        if not isfile(Unlock.LOOK_FILE) then return nil end
-        return game:GetService("HttpService"):JSONDecode(readfile(Unlock.LOOK_FILE))
-    end)
-    if not ok or type(snap) ~= "table" then return false end
-    return (UA.ApplySnapshot(snap))
-end
-function Unlock.lastLine()
-    local log = UA and UA.Log
-    if type(log) == "table" and #log > 0 then return (tostring(log[#log]):gsub("^%[Hydra%-UnlockAll%]%s*", "")) end
-    return ""
-end
-
-Hydra:AddTranslations({
-    ["Desbloquea todo de forma visual (solo lo ves vos)"] = "Unlocks everything visually (only you see it)",
-    ["Cosm\195\169ticos"] = "Cosmetics", ["Personajes"] = "Characters", ["Unusuals"] = "Unusuals", ["Perks"] = "Perks",
-    ["Animaci\195\179n de cargar"] = "Carry animation", ["Nametags"] = "Nametags", ["Boombox"] = "Boombox",
-    ["Perk en partida"] = "Perk in match", ["Nametag en partida"] = "Nametag in match", ["Boombox en partida"] = "Boombox in match",
-    ["Tambi\195\169n se ve durante la ronda"] = "Also shows during the round",
-    ["Skin del boombox"] = "Boombox skin", ["Eleg\195\173 cualquiera"] = "Pick any",
-    ["Look aleatorio"] = "Random look", ["Emotes, cosm\195\169ticos y skins al azar"] = "Random emotes, cosmetics and skins",
-    ["Guardar mi look"] = "Save my look", ["Lo que ten\195\169s puesto ahora"] = "What you are wearing now",
-    ["Cargar mi look"] = "Load my look", ["El \195\186ltimo que guardaste"] = "The last one you saved",
-    ["Cargar mi look al activar"] = "Load my look when turning on", ["Se pone solo cada vez que lo prend\195\169s"] = "It is applied every time you turn it on",
-    ["Unlock All activo"] = "Unlock All on", ["Unlock All no se pudo activar"] = "Unlock All could not turn on",
-    ["Activ\195\161 Unlock All primero"] = "Turn on Unlock All first", ["Look guardado"] = "Look saved", ["Look aplicado"] = "Look applied",
-    ["No hay un look guardado"] = "There is no saved look", ["Tu ejecutor no puede guardar archivos"] = "Your executor can't save files",
-})
-
-local TabExtra = Hydra:Tab({Id = "Extra", Title = "Extra", Caption = "EXTRA", Icon = "\226\156\142"})
--- ==================== AVATAR (al principio de Extra) ====================
--- Cambia tu avatar de forma VISUAL (solo en tu pantalla), igual que Yin Yang:
---  - El cuerpo que se ve en Evade es el rig de Workspace.Rigs.<tu nombre> (RigService.buildRig le pone tu nombre;
---    verificado en la extraccion). Se le aplica la HumanoidDescription del jugador elegido.
---  - En R15 ese rig no tiene HumanoidRootPart (Evade lo une al personaje real con rig.Joints.Root) y Roblox rechaza
---    ApplyDescription sin ella: se pone una raiz temporal invisible solo mientras se aplica y despues se borra.
---  - La ropa y los accesorios que pone el juego no vienen de una HumanoidDescription: se sacan antes de aplicar.
---  - El look se guarda (Hydra_Avatar.json) y se vuelve a poner al entrar y cada vez que Evade arma un rig nuevo.
-local Avatar = {FILE = "Hydra_Avatar.json", look = nil, saved = {}, korblox = false, deleted = false, busy = false,
-    head = {on = false, conn = nil, faces = {}}, KORBLOX_LEG = 139607718,
-    LIST_PROPS = {"HatAccessory", "HairAccessory", "FaceAccessory", "NeckAccessory", "ShouldersAccessory", "FrontAccessory", "BackAccessory", "WaistAccessory"},
-    ID_PROPS = {"HatAccessory", "HairAccessory", "FaceAccessory", "NeckAccessory", "ShouldersAccessory", "FrontAccessory", "BackAccessory", "WaistAccessory",
-        "Shirt", "Pants", "GraphicTShirt", "Face", "Head", "Torso", "LeftArm", "RightArm", "LeftLeg", "RightLeg"},
-    COLOR_PROPS = {"HeadColor", "TorsoColor", "LeftArmColor", "RightArmColor", "LeftLegColor", "RightLegColor"},
-    SCALE_PROPS = {"BodyTypeScale", "DepthScale", "HeadScale", "HeightScale", "ProportionScale", "WidthScale"}}
-function Avatar.rig()
-    local rigs = workspace:FindFirstChild("Rigs")
-    local rig = rigs and rigs:FindFirstChild(LocalPlayer.Name)
-    return rig, rig and rig:FindFirstChildOfClass("Humanoid")
-end
--- si ApplyDescription cambio una parte del cuerpo, las uniones de rig.Joints quedan en la parte vieja: se reconectan
--- a la nueva con el mismo nombre (las que van al personaje real no se tocan)
-function Avatar.repairJoints(rig)
-    local joints = rig and rig:FindFirstChild("Joints")
-    if not joints then return end
-    for _, joint in ipairs(joints:GetDescendants()) do
-        if joint:IsA("JointInstance") then
-            for _, key in ipairs({"Part0", "Part1"}) do
-                local part = joint[key]
-                if part and not part:IsDescendantOf(workspace) then
-                    local replacement = rig:FindFirstChild(part.Name)
-                    if replacement and replacement:IsA("BasePart") then joint[key] = replacement end
-                end
-            end
-        end
-    end
-end
-function Avatar.applySafe(humanoid, description)
-    local rig = humanoid and humanoid.Parent
-    if rig and not rig:FindFirstChild("HumanoidRootPart") then
-        local tempRoot = Instance.new("Part")
-        tempRoot.Name = "HumanoidRootPart"
-        tempRoot.Size = Vector3.new(2, 2, 1)
-        tempRoot.Transparency = 1
-        tempRoot.CanCollide, tempRoot.CanQuery, tempRoot.CanTouch = false, false, false
-        tempRoot.Massless = true
-        tempRoot.Anchored = false
-        local reference = nil
-        pcall(function()
-            local joints = rig:FindFirstChild("Joints")
-            local rootJoint = joints and joints:FindFirstChild("Root")
-            if rootJoint and rootJoint.Part0 and rootJoint.Part0:IsDescendantOf(workspace) then reference = rootJoint.Part0 end
-        end)
-        reference = reference or rig:FindFirstChild("LowerTorso") or rig:FindFirstChild("Torso")
-        if reference then tempRoot.CFrame = reference.CFrame end
-        tempRoot.Parent = rig
-        -- solo ApplyDescription (cambia lo distinto): ApplyDescriptionReset reconstruye todo el cuerpo
-        local ok, err = pcall(function() humanoid:ApplyDescription(description) end)
-        pcall(function() tempRoot:Destroy() end)
-        pcall(Avatar.repairJoints, rig)
-        if ok then return true end
-        return false, tostring(err)
-    end
-    local okReset, errReset = pcall(function() humanoid:ApplyDescriptionReset(description) end)
-    if okReset then pcall(Avatar.repairJoints, rig) return true end
-    local okDiff, errDiff = pcall(function() humanoid:ApplyDescription(description) end)
-    pcall(Avatar.repairJoints, rig)
-    if okDiff then return true end
-    return false, tostring(errDiff or errReset)
-end
--- una pieza sola (Korblox): solo ApplyDescription; sin HumanoidRootPart usa la raiz temporal
-function Avatar.applyPart(humanoid, description)
-    local rig = humanoid and humanoid.Parent
-    if rig and not rig:FindFirstChild("HumanoidRootPart") then return Avatar.applySafe(humanoid, description) end
-    local ok, err = pcall(function() humanoid:ApplyDescription(description) end)
-    pcall(Avatar.repairJoints, rig)
-    if ok then return true end
-    return false, tostring(err)
-end
--- saca la ropa y los accesorios que puso el juego (la carpeta Joints no se toca)
-function Avatar.strip(rig)
-    if not rig then return end
-    local joints = rig:FindFirstChild("Joints")
-    for _, d in ipairs(rig:GetDescendants()) do
-        if (d:IsA("Accoutrement") or d:IsA("Clothing") or d:IsA("ShirtGraphic")) and not (joints and d:IsDescendantOf(joints)) then
-            pcall(function() d:Destroy() end)
-        end
-    end
-end
-function Avatar.removeHeadItems(rig)
-    if not rig then return end
-    local types = {Hat = true, Hair = true, Face = true, Eyebrow = true, Eyelash = true}
-    local attachments = {HatAttachment = true, HairAttachment = true, FaceFrontAttachment = true, FaceCenterAttachment = true}
-    for _, child in ipairs(rig:GetChildren()) do
-        if child:IsA("Accessory") then
-            local isHead = false
-            pcall(function() isHead = types[child.AccessoryType.Name] == true end)
-            if not isHead then
-                local handle = child:FindFirstChild("Handle")
-                local attachment = handle and handle:FindFirstChildOfClass("Attachment")
-                isHead = attachment ~= nil and attachments[attachment.Name] == true
-            end
-            if isHead then pcall(function() child:Destroy() end) end
-        end
-    end
-end
-
--- ---------- guardar el look ----------
-function Avatar.saveFile()
-    if type(writefile) ~= "function" then return end
-    pcall(function()
-        if Avatar.look then
-            writefile(Avatar.FILE, game:GetService("HttpService"):JSONEncode(Avatar.look))
-        elseif type(isfile) == "function" and isfile(Avatar.FILE) and type(delfile) == "function" then
-            delfile(Avatar.FILE)
-        else
-            writefile(Avatar.FILE, "null")
-        end
-    end)
-end
-function Avatar.loadFile()
+local function loadConfig()
     if type(readfile) ~= "function" or type(isfile) ~= "function" then return end
     pcall(function()
-        if not isfile(Avatar.FILE) then return end
-        local data = game:GetService("HttpService"):JSONDecode(readfile(Avatar.FILE))
-        if type(data) == "table" then Avatar.look = data end
-    end)
-end
-function Avatar.remember(desc, strip)
-    if not desc then return end
-    local look = {props = {}, colors = {}, scales = {}, layered = {}, strip = strip == true}
-    for _, p in ipairs(Avatar.ID_PROPS) do
-        local ok, v = pcall(function() return desc[p] end)
-        if ok and v ~= nil then look.props[p] = v end
-    end
-    -- con Korblox puesto se guarda la pierna original (el toggle la vuelve a cambiar)
-    if Avatar.saved.RightLeg ~= nil then look.props.RightLeg = Avatar.saved.RightLeg end
-    for _, p in ipairs(Avatar.COLOR_PROPS) do
-        pcall(function()
-            local c = desc[p]
-            if typeof(c) == "Color3" then look.colors[p] = {c.R, c.G, c.B} end
-        end)
-    end
-    for _, p in ipairs(Avatar.SCALE_PROPS) do
-        pcall(function()
-            local n = tonumber(desc[p])
-            if n then look.scales[p] = n end
-        end)
-    end
-    pcall(function()
-        for _, e in ipairs(desc:GetAccessories(false)) do
-            local typeName = nil
-            pcall(function() typeName = e.AccessoryType.Name end)
-            if e.AssetId and typeName then table.insert(look.layered, {id = e.AssetId, t = typeName, o = e.Order}) end
+        if not isfile(CONFIG_FILE) then return end
+        local data = game:GetService("HttpService"):JSONDecode(readfile(CONFIG_FILE))
+        for key, value in pairs(data) do
+            if Config[key] ~= nil and type(value) == type(Config[key]) then Config[key] = value end
         end
     end)
-    Avatar.look = look
-    Avatar.saveFile()
 end
-function Avatar.restoreLook()
-    local look = Avatar.look
-    if type(look) ~= "table" then return false end
-    local rig, humanoid = Avatar.rig()
-    if not (rig and humanoid) then return false end
-    local ok, desc = pcall(function() return humanoid:GetAppliedDescription() end)
-    if not ok or not desc then return false end
-    for p, v in pairs(look.props or {}) do
-        pcall(function()
-            if table.find(Avatar.LIST_PROPS, p) then desc[p] = tostring(v) else desc[p] = tonumber(v) or 0 end
-        end)
-    end
-    for p, c in pairs(look.colors or {}) do pcall(function() desc[p] = Color3.new(c[1], c[2], c[3]) end) end
-    for p, n in pairs(look.scales or {}) do pcall(function() desc[p] = tonumber(n) end) end
-    if type(look.layered) == "table" then
-        local list = {}
-        for i, e in ipairs(look.layered) do
-            local okT, accessoryType = pcall(function() return Enum.AccessoryType[e.t] end)
-            if okT and accessoryType then
-                list[#list + 1] = {AssetId = tonumber(e.id), AccessoryType = accessoryType, IsLayered = true, Order = tonumber(e.o) or i}
-            end
-        end
-        pcall(function() desc:SetAccessories(list, false) end)
-    end
-    if look.strip then pcall(Avatar.strip, rig) end
-    return (Avatar.applySafe(humanoid, desc)) == true
-end
-
--- ---------- piezas: Korblox y Headless ----------
-function Avatar.setKorblox(on)
-    local rig, humanoid = Avatar.rig()
-    if not (rig and humanoid) then return false end
-    local ok, desc = pcall(function() return humanoid:GetAppliedDescription() end)
-    if not ok or not desc then return false end
-    if on then
-        if Avatar.saved.RightLeg == nil then Avatar.saved.RightLeg = desc.RightLeg end
-        desc.RightLeg = Avatar.KORBLOX_LEG
-    else
-        desc.RightLeg = Avatar.saved.RightLeg or 0
-        Avatar.saved.RightLeg = nil
-    end
-    return (Avatar.applyPart(humanoid, desc)) == true
-end
--- Headless: la cabeza y la cara del rig se esconden en cada cuadro (Evade vuelve a poner LocalTransparencyModifier = 0).
--- Se busca el rig cada vez, asi sigue andando si Evade arma uno nuevo. Al apagar se devuelve todo.
-function Avatar.setHeadless(on)
-    local state = Avatar.head
-    if on then
-        if state.conn then return end
-        state.on = true
-        state.conn = RunService.RenderStepped:Connect(function()
-            local rig = Avatar.rig()
-            local head = rig and rig:FindFirstChild("Head")
-            if not head or not head:IsA("BasePart") then return end
-            head.LocalTransparencyModifier = 1
-            for _, child in ipairs(head:GetChildren()) do
-                if child:IsA("Decal") then
-                    if state.faces[child] == nil then state.faces[child] = child.Transparency end
-                    child.Transparency = 1
-                end
-            end
-        end)
-        return
-    end
-    if state.conn then pcall(function() state.conn:Disconnect() end) end
-    for decal, transparency in pairs(state.faces) do
-        pcall(function() if decal.Parent then decal.Transparency = transparency end end)
-    end
-    pcall(function()
-        local rig = Avatar.rig()
-        local head = rig and rig:FindFirstChild("Head")
-        if head and head:IsA("BasePart") then head.LocalTransparencyModifier = 0 end
+local saveToken = 0
+local function saveConfig()
+    if type(writefile) ~= "function" then return end
+    saveToken = saveToken + 1
+    local token = saveToken
+    task.delay(0.5, function()
+        if token ~= saveToken then return end
+        pcall(function() writefile(CONFIG_FILE, game:GetService("HttpService"):JSONEncode(Config)) end)
     end)
-    Avatar.head = {on = false, conn = nil, faces = {}}
 end
+loadConfig()
 
--- vuelve a poner todo lo guardado (al entrar, con un rig nuevo o despues de cambiar de avatar)
-function Avatar.reapply()
-    pcall(Avatar.restoreLook)
-    Avatar.saved.RightLeg = nil
-    if Avatar.korblox then pcall(Avatar.setKorblox, true) end
-    if Avatar.deleted then pcall(Avatar.removeHeadItems, (Avatar.rig())) end
+-- ==================== IDIOMA (detecta el idioma del jugador) ====================
+-- Espanol e ingles vienen completos. Para otros idiomas se usa el traductor de Roblox;
+-- si Roblox no tiene esa frase traducida, se muestra en ingles.
+local LocalizationService = game:GetService("LocalizationService")
+local Lang = {current = "en", system = "en", translator = nil, cache = {}, registry = setmetatable({}, {__mode = "k"}), onChange = nil}
+local EN = {
+    -- pestanas y titulos
+    -- pestanas y titulos
+    ["AJUSTES"] = "SETTINGS", ["Ajustes"] = "Settings", ["No hay nada para elegir"] = "Nothing to choose",
+    ["RIESGO"] = "RISK",
+    -- ajustes
+    ["Idioma"] = "Language", ["Autom\195\161tico = el idioma de tu Roblox"] = "Automatic = your Roblox language", ["Autom\195\161tico"] = "Automatic",
+    ["Ventana"] = "Window", ["Teclas"] = "Keys",
+    -- inicio
+    ["INICIO"] = "HOME", ["Inicio"] = "Home",
+    ["Buenos d\195\173as"] = "Good morning", ["Buenas tardes"] = "Good afternoon", ["Buenas noches"] = "Good evening",
+    ["Sesi\195\179n"] = "Session", ["En l\195\173nea"] = "Online",
+    ["Rendimiento"] = "Performance", ["Ping"] = "Ping", ["Jugadores"] = "Players", ["Servidor abierto hace"] = "Server up for",
+    ["Partida"] = "Match", ["Juego"] = "Game", ["Ejecutor"] = "Executor", ["Versi\195\179n"] = "Version",
+    ["Accesos r\195\161pidos"] = "Quick actions", ["Copiar servidor"] = "Copy server", ["Reentrar"] = "Rejoin",
+    ["ID del servidor copiado"] = "Server ID copied", ["Tu ejecutor no puede copiar"] = "Your executor can't copy",
+    ["Reentrando..."] = "Rejoining...", ["No se pudo reentrar"] = "Couldn't rejoin",
+    ["Bot\195\179n \226\128\147 : esconde la ventana. Toc\195\161 el bot\195\179n flotante para volver a abrirla. En PC tambi\195\169n con la tecla K. La \226\156\149 cierra el script."] = "\226\128\147 button: hides the window. Tap the floating button to open it again. On PC you can also press K. The \226\156\149 closes the script.",
+}
+local function normalizeLocale(localeId)
+    return string.lower(tostring(localeId or "en")):match("^(%a+)") or "en"
 end
-function Avatar.hasSaved() return Avatar.look ~= nil or Avatar.korblox or Avatar.deleted end
-
--- ---------- acciones de la interfaz ----------
-function Avatar.applyUser(info)
-    if Avatar.busy then return false, "Esper\195\161 un momento" end
-    local rig, humanoid = Avatar.rig()
-    if not (rig and humanoid) then return false, "Entr\195\161 a una partida primero" end
-    Avatar.busy = true
-    local okDesc, desc = pcall(function() return Players:GetHumanoidDescriptionFromUserId(info.id) end)
-    if not okDesc or not desc then Avatar.busy = false return false, "No se pudo cargar el avatar" end
-    rig, humanoid = Avatar.rig() -- el rig puede haber cambiado mientras cargaba
-    if not (rig and humanoid) then Avatar.busy = false return false, "Entr\195\161 a una partida primero" end
-    pcall(Avatar.strip, rig)
-    local ok = Avatar.applySafe(humanoid, desc)
-    if not ok then Avatar.busy = false return false, "No se pudo aplicar el avatar" end
-    Avatar.saved.RightLeg = nil
-    Avatar.remember(desc, true)
-    if Avatar.korblox then pcall(Avatar.setKorblox, true) end
-    if Avatar.deleted then pcall(Avatar.removeHeadItems, rig) end
-    Avatar.busy = false
-    return true, "\226\156\147 Avatar aplicado"
-end
-function Avatar.reset()
-    if Avatar.busy then return false, "Esper\195\161 un momento" end
-    local rig, humanoid = Avatar.rig()
-    if not (rig and humanoid) then return false, "Entr\195\161 a una partida primero" end
-    Avatar.busy = true
-    local okDesc, desc = pcall(function() return Players:GetHumanoidDescriptionFromUserId(LocalPlayer.UserId) end)
-    if not okDesc or not desc then Avatar.busy = false return false, "No se pudo cargar tu avatar" end
-    -- se apaga todo y se borra el look guardado (si no, se volveria a poner al reaparecer)
-    for _, id in ipairs({"avKorblox", "avHeadless", "avDeleted"}) do
-        local option = Hydra.Options[id]
-        if option then option:Set(false, true) end
+local function tr(spanish)
+    if Lang.current == "es" then return spanish end
+    local english = EN[spanish] or spanish
+    if Lang.current == "en" or not Lang.translator then return english end
+    local cached = Lang.cache[english]
+    if cached ~= nil then return cached or english end
+    local translated
+    pcall(function() translated = Lang.translator:Translate(game, english) end)
+    if translated and translated ~= "" and translated ~= english then
+        Lang.cache[english] = translated
+        return translated
     end
-    Avatar.korblox, Avatar.deleted = false, false
-    Avatar.saved = {}
-    Avatar.setHeadless(false)
-    Avatar.look = nil
-    Avatar.saveFile()
-    rig, humanoid = Avatar.rig()
-    if not (rig and humanoid) then Avatar.busy = false return false, "Entr\195\161 a una partida primero" end
-    pcall(Avatar.strip, rig)
-    local ok = Avatar.applySafe(humanoid, desc)
-    Avatar.busy = false
-    if not ok then return false, "No se pudo restablecer" end
-    return true, "\226\156\147 Tu skin original volvi\195\179"
+    Lang.cache[english] = false
+    return english
 end
-
-Hydra:AddTranslations({
-    ["Avatar"] = "Avatar",
-    ["Esper\195\161 un momento"] = "Wait a moment", ["Entr\195\161 a una partida primero"] = "Join a match first",
-    ["No se pudo cargar el avatar"] = "The avatar could not be loaded", ["No se pudo aplicar el avatar"] = "The avatar could not be applied",
-    ["\226\156\147 Avatar aplicado"] = "\226\156\147 Avatar applied", ["No se pudo cargar tu avatar"] = "Your avatar could not be loaded",
-    ["No se pudo restablecer"] = "Could not reset", ["\226\156\147 Tu skin original volvi\195\179"] = "\226\156\147 Your original skin is back",
-    ["Restablecer skin"] = "Reset skin", ["Vuelve a tu avatar original"] = "Goes back to your original avatar",
-    ["Pierna Korblox"] = "Korblox leg", ["Pierna derecha Korblox"] = "Korblox right leg",
-    ["Cabeza invisible"] = "Invisible head", ["Sin cabeza y sin accesorios de la cabeza"] = "No head and no head accessories",
-    ["Se pone cuando entres a una partida"] = "It applies when you join a match",
-})
-
-TabExtra:Section("Avatar", "A")
-local AvatarSearch = TabExtra:PlayerSearch({Placeholder = "Nombre de usuario", ButtonText = "Aplicar",
-    Callback = function(info) return Avatar.applyUser(info) end})
-TabExtra:Button({Title = "Restablecer skin", Desc = "Vuelve a tu avatar original", Icon = "A",
-    Callback = function()
-        task.spawn(function()
-            local ok, message = Avatar.reset()
-            AvatarSearch:SetStatus(message, ok and "ok" or "bad")
-            Hydra:Notify(Hydra:T(message))
-        end)
-    end})
-TabExtra:Toggle({Id = "avKorblox", Title = "Pierna Korblox", Desc = "Pierna derecha Korblox", Icon = "A",
-    Callback = function(on)
-        Avatar.korblox = on
-        task.spawn(function()
-            if not Avatar.rig() then
-                if on then Hydra:Notify(Hydra:T("Se pone cuando entres a una partida")) end
-                return
-            end
-            if not on and Avatar.saved.RightLeg == nil then return end
-            pcall(Avatar.setKorblox, on)
-        end)
-    end})
-local HeadlessToggle, DeletedToggle
-HeadlessToggle = TabExtra:Toggle({Id = "avHeadless", Title = "Headless", Desc = "Cabeza invisible", Icon = "A",
-    Callback = function(on)
-        if on and DeletedToggle and DeletedToggle:Get() then DeletedToggle:Set(false, true) Avatar.deleted = false end
-        Avatar.setHeadless(on or (DeletedToggle ~= nil and DeletedToggle:Get()))
-    end})
-DeletedToggle = TabExtra:Toggle({Id = "avDeleted", Title = "Headless + Deleted", Desc = "Sin cabeza y sin accesorios de la cabeza", Icon = "A",
-    Callback = function(on)
-        if on and HeadlessToggle:Get() then HeadlessToggle:Set(false, true) end
-        Avatar.deleted = on
-        Avatar.setHeadless(on or HeadlessToggle:Get())
-        if on then pcall(Avatar.removeHeadItems, (Avatar.rig())) end
-    end})
-Avatar.korblox, Avatar.deleted = Hydra.Options.avKorblox:Get(), DeletedToggle:Get()
-
--- al entrar: espera tu rig y pone lo guardado; si Evade arma un rig nuevo para vos, lo vuelve a poner
-Avatar.loadFile()
+local function resolveLanguage()
+    local mode = Config.language
+    if mode == "es" or mode == "en" then return mode end
+    return Lang.system
+end
+local function applyLanguage(force)
+    local language = resolveLanguage()
+    if language == Lang.current and not force then return end
+    Lang.current, Lang.cache = language, {}
+    for inst, key in pairs(Lang.registry) do
+        if inst.Parent then inst.Text = tr(key) end
+    end
+    if Lang.onChange then pcall(Lang.onChange) end
+end
+pcall(function()
+    local locale = LocalizationService.SystemLocaleId
+    if locale and locale ~= "" then Lang.system = normalizeLocale(locale) end
+end)
+Lang.current = resolveLanguage()
+-- el idioma que el jugador eligio en Roblox manda sobre el del sistema
 task.spawn(function()
-    if Avatar.hasSaved() then
-        local waited = 0
-        while waited < 120 and not Avatar.rig() do task.wait(1) waited = waited + 1 end
-        if Avatar.rig() then task.wait(1) pcall(Avatar.reapply) end
-    end
-    local rigs = workspace:WaitForChild("Rigs", 60)
-    if rigs then
-        rigs.ChildAdded:Connect(function(child)
-            if child.Name ~= LocalPlayer.Name or not Avatar.hasSaved() then return end
-            task.wait(2)
-            pcall(Avatar.reapply)
+    local ok, translator = pcall(function() return LocalizationService:GetTranslatorForPlayerAsync(LocalPlayer) end)
+    if not ok or not translator then return end
+    Lang.translator = translator
+    Lang.system = normalizeLocale(translator.LocaleId)
+    Lang.cache = {}
+    applyLanguage(true)
+    pcall(function()
+        translator:GetPropertyChangedSignal("LocaleId"):Connect(function()
+            Lang.system = normalizeLocale(translator.LocaleId)
+            applyLanguage()
         end)
-    end
+    end)
 end)
 
-TabExtra:Section("Unlock All", "\226\156\142")
-local UnlockToggle
-UnlockToggle = TabExtra:Toggle({Id = "unlockAll", Title = "Unlock All", Desc = "Desbloquea todo de forma visual (solo lo ves vos)", Icon = "\226\156\142", Keybind = true, Floating = true,
-    Callback = function(on)
-        if not UA then
-            Hydra:Notify("Unlock All: " .. Hydra:T("No disponible en este ejecutor"))
-            task.defer(function() UnlockToggle:Set(false, true) end)
-            return
+
+-- colores
+local C = {
+    -- tema oscuro tipo glass: fondo casi negro translucido, tarjetas de vidrio claro, acento blanco/plateado
+    Bg = Color3.fromRGB(12, 14, 19), Card = Color3.fromRGB(30, 34, 43), Field = Color3.fromRGB(38, 43, 54),
+    Glass = Color3.fromRGB(255, 255, 255),
+    Stroke = Color3.fromRGB(150, 156, 172), Text = Color3.fromRGB(248, 249, 252), Dim = Color3.fromRGB(212, 216, 226),
+    Accent = Color3.fromRGB(236, 239, 245), AccentDark = Color3.fromRGB(140, 146, 160), AccentSoft = Color3.fromRGB(62, 66, 78),
+    On = Color3.fromRGB(236, 239, 245), Off = Color3.fromRGB(70, 75, 88),
+    Warn = Color3.fromRGB(255, 176, 86),
+    Good = Color3.fromRGB(46, 214, 170), Mid = Color3.fromRGB(255, 190, 80), Bad = Color3.fromRGB(255, 96, 110),
+}
+
+-- contenedor propio (fuera del Workspace del juego)
+local guiParent = LocalPlayer:WaitForChild("PlayerGui")
+pcall(function()
+    if typeof(gethui) == "function" then
+        local hidden = gethui()
+        if hidden then guiParent = hidden end
+    end
+end)
+for _, name in ipairs({"Hydra"}) do
+    local old = guiParent:FindFirstChild(name)
+    if old then old:Destroy() end
+end
+
+local Connections = {}
+local function track(connection) table.insert(Connections, connection) return connection end
+
+-- ==================== UTILIDADES ====================
+local function mk(class, props)
+    local inst = Instance.new(class)
+    for key, value in pairs(props) do
+        if key ~= "Parent" then inst[key] = value end
+    end
+    -- si el texto es una frase conocida, se traduce y se anota para cambiarla si cambia el idioma
+    local text = props.Text
+    if type(text) == "string" and EN[text] then
+        Lang.registry[inst] = text
+        inst.Text = tr(text)
+    end
+    -- contorno oscuro suave en los textos: se leen bien aunque detras haya partes claras del fondo
+    if class == "TextLabel" or class == "TextBox" then
+        local outline = Instance.new("UIStroke")
+        outline.ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual
+        outline.Color = Color3.new(0, 0, 0)
+        outline.Thickness = 1.2
+        outline.Transparency = 0.45
+        outline.Parent = inst
+    end
+    inst.Parent = props.Parent
+    return inst
+end
+local function corner(parent, radius) return mk("UICorner", {CornerRadius = UDim.new(0, radius), Parent = parent}) end
+local function stroke(parent, color, transparency)
+    return mk("UIStroke", {Color = color, Thickness = 1, Transparency = transparency or 0, ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Parent = parent})
+end
+local function tween(inst, time, goals, style)
+    local t = TweenService:Create(inst, TweenInfo.new(time, style or Enum.EasingStyle.Quint, Enum.EasingDirection.Out), goals)
+    t:Play()
+    return t
+end
+
+-- iconos: las letras     salen como cuadros en algunos celulares, asi que se dibujan como imagenes (ids del script Sapphire).
+-- La clave es la letra que ya usa cada pestana/seccion; si una letra no esta aca se sigue dibujando como texto.
+local ICON_IMAGES = {
+    ["\226\158\164"] = "rbxassetid://7734058599", -- Blatant
+    ["\226\156\166"] = "rbxassetid://7733954760", -- World
+    ["\226\151\142"] = "rbxassetid://7734056608", -- Detection
+    ["\226\156\142"] = "rbxassetid://7733917120", -- Misc
+    ["\226\154\153"] = "rbxassetid://82447077635685", -- Ajustes
+    ["\226\151\183"] = "rbxassetid://7733774602", -- Visual
+    ["\226\150\162"] = "rbxassetid://7734053495", -- GUI
+    ["\226\140\130"] = "rbxassetid://131051652075705", -- Inicio
+}
+local function mkIcon(glyph, color, imageProps, textProps)
+    local image = ICON_IMAGES[glyph] or ((type(glyph) == "string" and string.sub(glyph, 1, 13) == "rbxassetid://") and glyph or nil)
+    if image then
+        imageProps.Image, imageProps.ImageColor3, imageProps.BackgroundTransparency = image, color, 1
+        return mk("ImageLabel", imageProps), "ImageColor3"
+    end
+    textProps.Text, textProps.TextColor3 = glyph, color
+    return mk("TextLabel", textProps), "TextColor3"
+end
+
+-- ==================== INTERFAZ ====================
+local Gui = mk("ScreenGui", {Name = "Hydra", ResetOnSpawn = false, IgnoreGuiInset = true, ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 60, Parent = guiParent})
+local isMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+local WIDTH, HEIGHT = isMobile and 480 or 590, isMobile and 350 or 445
+
+local Window = mk("Frame", {
+    Size = UDim2.fromOffset(WIDTH, HEIGHT), Position = UDim2.new(0.5, -WIDTH / 2, 0.5, -HEIGHT / 2),
+    BackgroundColor3 = C.Bg, BackgroundTransparency = 0.06, BorderSizePixel = 0, ClipsDescendants = true, Parent = Gui,
+})
+-- brillo de vidrio: arriba un poco mas claro
+mk("UIGradient", {Rotation = 90, Color = ColorSequence.new(Color3.fromRGB(255, 255, 255), Color3.fromRGB(170, 176, 190)), Parent = Window})
+corner(Window, 18)
+stroke(Window, C.Stroke, 0.1)
+local WindowScale = mk("UIScale", {Scale = 0.9, Parent = Window})
+-- imagen de fondo de la ventana: va detras de todo y un poco transparente para que el texto se lea
+local BG_IMAGE_ID, BG_IMAGE_TRANSPARENCY = "rbxassetid://104092388902076", 0.3
+local CARD_ALPHA, BAR_ALPHA = 0.9, 0.4 -- transparencia de las tarjetas de opciones y de la barra de pestanas (0 = blanco opaco, 1 = invisible)
+local WindowBg = mk("ImageLabel", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Image = BG_IMAGE_ID, ImageTransparency = BG_IMAGE_TRANSPARENCY, ScaleType = Enum.ScaleType.Crop, ZIndex = 0, Parent = Window})
+corner(WindowBg, 18)
+
+-- cabecera
+local Header = mk("Frame", {Size = UDim2.new(1, 0, 0, 56), BackgroundTransparency = 1, Parent = Window})
+
+-- titulo
+local TitleRow = mk("Frame", {Size = UDim2.new(1, -196, 0, 28), Position = UDim2.fromOffset(16, 6), BackgroundTransparency = 1, Parent = Header})
+mk("UIListLayout", {FillDirection = Enum.FillDirection.Horizontal, VerticalAlignment = Enum.VerticalAlignment.Center, Padding = UDim.new(0, 7), SortOrder = Enum.SortOrder.LayoutOrder, Parent = TitleRow})
+local TitleText = mk("TextLabel", {Size = UDim2.new(0, 0, 1, 0), AutomaticSize = Enum.AutomaticSize.X, BackgroundTransparency = 1, Text = "Hydra", TextColor3 = C.Text, Font = Enum.Font.GothamBlack, TextSize = 25, MaxVisibleGraphemes = 0, LayoutOrder = 1, Parent = TitleRow})
+do local outline = TitleText:FindFirstChildOfClass("UIStroke") if outline then outline:Destroy() end end
+-- efecto del nombre (el mismo de "Ultra" en la libreria): un brillo recorre las letras y descansa un momento
+local TitleGradient = mk("UIGradient", {Transparency = NumberSequence.new({
+    NumberSequenceKeypoint.new(0, 0.65), NumberSequenceKeypoint.new(0.5, 0), NumberSequenceKeypoint.new(1, 0.65),
+}), Offset = Vector2.new(-1, 0), Parent = TitleText})
+TweenService:Create(TitleGradient, TweenInfo.new(1.8, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, false, 0.6), {Offset = Vector2.new(1, 0)}):Play()
+-- entrada: el titulo se escribe letra por letra
+task.spawn(function()
+    for count = 1, #"Hydra" do
+        TitleText.MaxVisibleGraphemes = count
+        task.wait(0.06)
+    end
+    TitleText.MaxVisibleGraphemes = -1
+end)
+
+local HeaderSub = mk("TextLabel", {Size = UDim2.new(1, -196, 0, 14), Position = UDim2.fromOffset(16, 36), BackgroundTransparency = 1, Text = "", TextColor3 = C.Dim, Font = Enum.Font.GothamMedium, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = Header})
+local function headerButton(text, offset, image)
+    local button = mk("TextButton", {Size = UDim2.fromOffset(28, 28), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, offset, 0, 28), BackgroundColor3 = C.Card, AutoButtonColor = false, Text = image and "" or text, TextColor3 = C.Dim, Font = Enum.Font.GothamBold, TextSize = 14, Parent = Header})
+    corner(button, 999)
+    stroke(button, C.Stroke, 0.3)
+    if image then
+        mk("ImageLabel", {Size = UDim2.fromOffset(14, 14), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), BackgroundTransparency = 1, Image = image, ImageColor3 = C.Dim, ScaleType = Enum.ScaleType.Fit, Parent = button})
+    end
+    return button
+end
+local HideButton = headerButton("\226\128\147", -46, "rbxassetid://81811812656965")
+local CloseButton = headerButton("\226\156\149", -12, "rbxassetid://115244780748239")
+-- chip de estado: la pelota que te persigue, en vivo
+local Chip = mk("Frame", {Size = UDim2.fromOffset(108, 26), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -82, 0, 28), BackgroundColor3 = C.Card, BorderSizePixel = 0, Parent = Header})
+corner(Chip, 999)
+local ChipStroke = stroke(Chip, C.Stroke, 0.3)
+local ChipDot = mk("Frame", {Size = UDim2.fromOffset(8, 8), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 10, 0.5, 0), BackgroundColor3 = C.Dim, BorderSizePixel = 0, Parent = Chip})
+corner(ChipDot, 999)
+local ChipText = mk("TextLabel", {Size = UDim2.new(1, -26, 1, 0), Position = UDim2.fromOffset(22, 0), BackgroundTransparency = 1, Text = "", TextColor3 = C.Dim, Font = Enum.Font.GothamBold, TextSize = 10, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = Chip})
+
+-- paginas
+local Pages = mk("Frame", {Size = UDim2.new(1, -20, 1, -126), Position = UDim2.fromOffset(10, 60), BackgroundTransparency = 1, Parent = Window})
+
+-- ==================== PESTANAS ABAJO EN CARRUSEL ====================
+-- Carrusel: vuelta infinita,
+-- arrastre con inercia, los iconos de los bordes se achican, giran un poco al moverse
+-- y la pestana elegida se centra con animacion.
+local TabBar = mk("Frame", {Size = UDim2.new(1, -16, 0, 54), Position = UDim2.new(0, 8, 1, -60), BackgroundColor3 = C.Card, BackgroundTransparency = BAR_ALPHA, BorderSizePixel = 0, ClipsDescendants = true, Parent = Window})
+corner(TabBar, 16)
+stroke(TabBar, C.Stroke, 0.2)
+local Viewport = mk("Frame", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ClipsDescendants = true, Parent = TabBar})
+for _, side in ipairs({0, 1}) do
+    local fade = mk("Frame", {Size = UDim2.new(0, 30, 1, 0), AnchorPoint = Vector2.new(side, 0), Position = UDim2.fromScale(side, 0), BackgroundColor3 = C.Card, BackgroundTransparency = BAR_ALPHA, BorderSizePixel = 0, ZIndex = 5, Parent = TabBar})
+    corner(fade, 16) -- mismas esquinas redondas que la barra, para que no sobresalgan
+    mk("UIGradient", {Rotation = side == 0 and 0 or 180, Transparency = NumberSequence.new(0, 1), Parent = fade})
+end
+
+local TAB_SIZE, TAB_MIN_STEP = 48, 58
+local Carousel = {items = {}, offset = 0, velocity = 0, viewW = 0, anim = nil, spin = 0, lastOffset = 0, step = TAB_MIN_STEP, press = nil}
+
+local function renderCarousel()
+    local count, viewW = #Carousel.items, Carousel.viewW
+    if count == 0 or viewW <= 0 then return end
+    local step = Carousel.step
+    local length = count * step
+    Carousel.offset = Carousel.offset % length
+    local moved = ((Carousel.offset - Carousel.lastOffset + length / 2) % length) - length / 2
+    Carousel.lastOffset = Carousel.offset
+    Carousel.spin = math.clamp(Carousel.spin - moved * 0.6, -24, 24)
+    for index, item in ipairs(Carousel.items) do
+        local x = (((index - 1) * step - Carousel.offset + step) % length) - step
+        item.button.Position = UDim2.new(0, x + step / 2, 0.5, 0)
+        local d = math.clamp(math.abs((x + step / 2) - viewW / 2) / math.max(viewW / 2, 1), 0, 1)
+        item.scale.Scale = 1 - 0.25 * math.clamp((d - 0.55) / 0.45, 0, 1)
+        item.dist = d
+        item.icon.Rotation = Carousel.spin * (0.6 + 0.8 * d)
+    end
+end
+
+local function focusCarousel(name, animate)
+    if Carousel.viewW <= 0 then return end
+    local index
+    for i, item in ipairs(Carousel.items) do
+        if item.name == name then index = i break end
+    end
+    if not index then return end
+    local length = #Carousel.items * Carousel.step
+    local target = (index - 1) * Carousel.step + Carousel.step / 2 - Carousel.viewW / 2
+    local delta = (target - Carousel.offset + length / 2) % length - length / 2
+    Carousel.velocity = 0
+    if animate then
+        Carousel.anim = {from = Carousel.offset, to = Carousel.offset + delta, t0 = os.clock(), dur = 0.35}
+    else
+        Carousel.anim = nil
+        Carousel.offset = Carousel.offset + delta
+        renderCarousel()
+    end
+end
+
+local Tabs, currentTab = {}, nil
+local TabTitles = {Home = "Inicio", Settings = "Ajustes"}
+
+local function relayoutCarousel()
+    local scale = WindowScale.Scale
+    if type(scale) ~= "number" or scale < 0.05 then scale = 1 end
+    Carousel.viewW = Viewport.AbsoluteSize.X / scale
+    local count = #Carousel.items
+    -- el paso se estira para que la vuelta infinita nunca deje huecos visibles
+    if count > 0 then Carousel.step = math.max(TAB_MIN_STEP, (Carousel.viewW + 2 * TAB_SIZE) / count) end
+    Carousel.anim = nil
+    Carousel.velocity = 0
+    renderCarousel()
+    if currentTab then focusCarousel(currentTab, false) end
+end
+track(Viewport:GetPropertyChangedSignal("AbsoluteSize"):Connect(relayoutCarousel))
+Viewport.InputChanged:Connect(function(input)
+    if input.UserInputType ~= Enum.UserInputType.MouseWheel then return end
+    Carousel.anim = nil
+    Carousel.velocity = Carousel.velocity - input.Position.Z * 520
+end)
+
+local function selectTab(name)
+    HeaderSub.Text = tr(TabTitles[name] or name)
+    for tabName, tab in pairs(Tabs) do
+        local on = tabName == name
+        tab.page.Visible = on
+        tween(tab.icon, 0.25, {[tab.iconProp] = on and C.Accent or C.Dim, [tab.iconProp == "ImageColor3" and "ImageTransparency" or "TextTransparency"] = on and 0 or 0.35})
+        tween(tab.caption, 0.25, {TextColor3 = on and C.Accent or C.Dim, TextTransparency = on and 0 or 0.35})
+        tween(tab.underline, 0.3, {Size = UDim2.fromOffset(on and 18 or 0, 3)}, Enum.EasingStyle.Back)
+    end
+    currentTab = name
+    focusCarousel(name, true)
+end
+
+local function createTab(order, name, icon, caption)
+    local button = mk("TextButton", {Size = UDim2.fromOffset(TAB_SIZE, 44), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0, 0, 0.5, 0), BackgroundColor3 = C.Field, BackgroundTransparency = 1, AutoButtonColor = false, Text = "", ZIndex = 2, Parent = Viewport})
+    corner(button, 13)
+    local buttonStroke = stroke(button, C.Stroke, 1)
+    local underline = mk("Frame", {Size = UDim2.fromOffset(0, 3), AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 1, 2), BackgroundColor3 = C.Accent, BorderSizePixel = 0, ZIndex = 3, Parent = button})
+    corner(underline, 99)
+    local iconLabel, iconProp = mkIcon(icon, C.Dim, {Size = UDim2.fromOffset(22, 22), Position = UDim2.new(0.5, -11, 0, 4), ScaleType = Enum.ScaleType.Fit, ZIndex = 3, Parent = button},
+        {Size = UDim2.new(1, 0, 0, 24), Position = UDim2.fromOffset(0, 3), BackgroundTransparency = 1, Font = Enum.Font.GothamBold, TextSize = 17, ZIndex = 3, Parent = button})
+    local captionLabel = mk("TextLabel", {Size = UDim2.new(1, 0, 0, 12), Position = UDim2.fromOffset(0, 28), BackgroundTransparency = 1, Text = caption, TextColor3 = C.Dim, Font = Enum.Font.GothamBold, TextSize = 8, ZIndex = 3, Parent = button})
+    local page = mk("ScrollingFrame", {
+        Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3,
+        ScrollBarImageColor3 = C.Accent, CanvasSize = UDim2.new(0, 0, 0, 0), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+        Visible = false, Parent = Pages,
+    })
+    mk("UIListLayout", {Padding = UDim.new(0, 7), SortOrder = Enum.SortOrder.LayoutOrder, Parent = page})
+    mk("UIPadding", {PaddingRight = UDim.new(0, 6), PaddingBottom = UDim.new(0, 10), Parent = page})
+    Tabs[name] = {button = button, icon = iconLabel, iconProp = iconProp, caption = captionLabel, stroke = buttonStroke, underline = underline, page = page, order = 0}
+    local item = {name = name, button = button, icon = iconLabel, scale = mk("UIScale", {Scale = 1, Parent = button})}
+    table.insert(Carousel.items, item)
+    -- tocar sin arrastrar = elegir pestana; arrastrar = mover el carrusel
+    button.InputBegan:Connect(function(input)
+        local inputType = input.UserInputType
+        if inputType ~= Enum.UserInputType.MouseButton1 and inputType ~= Enum.UserInputType.Touch then return end
+        if Carousel.press then return end
+        Carousel.anim, Carousel.velocity = nil, 0
+        Carousel.press = {input = input, startX = input.Position.X, lastX = input.Position.X, lastT = os.clock(), moved = false, item = item}
+    end)
+    return Tabs[name]
+end
+
+track(UserInputService.InputChanged:Connect(function(input)
+    local press = Carousel.press
+    if not press then return end
+    local pressType, inputType = press.input.UserInputType, input.UserInputType
+    local matches = (inputType == Enum.UserInputType.MouseMovement and pressType == Enum.UserInputType.MouseButton1)
+        or (inputType == Enum.UserInputType.Touch and pressType == Enum.UserInputType.Touch)
+    if not matches then return end
+    local x = input.Position.X
+    if not press.moved and math.abs(x - press.startX) > 7 then press.moved = true end
+    if press.moved then
+        local now = os.clock()
+        local dt = math.max(now - press.lastT, 1 / 240)
+        local scale = (type(WindowScale.Scale) == "number" and WindowScale.Scale > 0.05) and WindowScale.Scale or 1
+        local dx = (x - press.lastX) / scale
+        Carousel.offset = Carousel.offset - dx
+        Carousel.velocity = Carousel.velocity * 0.5 + (-dx / dt) * 0.5
+        press.lastT = now
+        renderCarousel()
+    end
+    press.lastX = x
+end))
+track(UserInputService.InputEnded:Connect(function(input)
+    local press = Carousel.press
+    if not press or input.UserInputType ~= press.input.UserInputType then return end
+    Carousel.press = nil
+    if press.moved then
+        if os.clock() - press.lastT > 0.08 then Carousel.velocity = 0 end
+    else
+        selectTab(press.item.name)
+    end
+end))
+track(RunService.Heartbeat:Connect(function(dt)
+    if Carousel.spin ~= 0 then
+        Carousel.spin = Carousel.spin * math.exp(-9 * dt)
+        if math.abs(Carousel.spin) < 0.05 then Carousel.spin = 0 end
+        for _, item in ipairs(Carousel.items) do item.icon.Rotation = Carousel.spin * (0.6 + 0.8 * (item.dist or 0)) end
+    end
+    if Carousel.press and Carousel.press.moved then return end
+    local anim = Carousel.anim
+    if anim then
+        local t = math.min((os.clock() - anim.t0) / anim.dur, 1)
+        Carousel.offset = anim.from + (anim.to - anim.from) * (1 - (1 - t) ^ 3)
+        if t >= 1 then Carousel.anim = nil end
+        renderCarousel()
+    elseif math.abs(Carousel.velocity) > 8 then
+        Carousel.offset = Carousel.offset + Carousel.velocity * dt
+        Carousel.velocity = Carousel.velocity * math.exp(-4.2 * dt)
+        renderCarousel()
+    elseif Carousel.velocity ~= 0 then
+        Carousel.velocity = 0
+    end
+end))
+
+-- ---------- avisos tipo notificacion ----------
+local ToastHolder = mk("Frame", {Size = UDim2.fromOffset(320, 0), AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 1, -24), BackgroundTransparency = 1, Parent = Gui})
+mk("UIListLayout", {Padding = UDim.new(0, 6), VerticalAlignment = Enum.VerticalAlignment.Bottom, HorizontalAlignment = Enum.HorizontalAlignment.Center, SortOrder = Enum.SortOrder.LayoutOrder, Parent = ToastHolder})
+local toastCount = 0
+local function toast(text, color)
+    toastCount = toastCount + 1
+    local card = mk("Frame", {Size = UDim2.fromOffset(0, 32), AutomaticSize = Enum.AutomaticSize.X, BackgroundColor3 = C.Card, BorderSizePixel = 0, LayoutOrder = toastCount, Parent = ToastHolder})
+    corner(card, 999)
+    stroke(card, color or C.Stroke, 0.25)
+    mk("UIPadding", {PaddingLeft = UDim.new(0, 14), PaddingRight = UDim.new(0, 14), Parent = card})
+    mk("TextLabel", {Size = UDim2.new(0, 0, 1, 0), AutomaticSize = Enum.AutomaticSize.X, BackgroundTransparency = 1, Text = text, TextColor3 = C.Text, Font = Enum.Font.GothamBold, TextSize = 12, Parent = card})
+    local scale = mk("UIScale", {Scale = 0.85, Parent = card})
+    tween(scale, 0.25, {Scale = 1}, Enum.EasingStyle.Back)
+    task.delay(2.6, function()
+        if card.Parent then card:Destroy() end
+    end)
+end
+
+-- ---------- componentes ----------
+local function nextOrder(tab) tab.order = tab.order + 1; return tab.order end
+
+local function section(tab, text, icon)
+    local row = mk("Frame", {Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1, LayoutOrder = nextOrder(tab), Parent = tab.page})
+    mkIcon(icon or "\226\128\162", C.Accent, {Size = UDim2.fromOffset(16, 16), Position = UDim2.fromOffset(2, 5), ScaleType = Enum.ScaleType.Fit, Parent = row},
+        {Size = UDim2.fromOffset(20, 26), BackgroundTransparency = 1, Font = Enum.Font.GothamBold, TextSize = 14, Parent = row})
+    mk("TextLabel", {Size = UDim2.new(1, -24, 1, 0), Position = UDim2.fromOffset(24, 0), BackgroundTransparency = 1, Text = text, TextColor3 = C.Text, Font = Enum.Font.GothamBlack, TextSize = 13, TextXAlignment = Enum.TextXAlignment.Left, Parent = row})
+end
+
+-- titulo (+ insignia RIESGO opcional) y subtitulo de una fila
+local function labels(row, title, subtitle, x, right, risk)
+    local line = mk("Frame", {Size = UDim2.new(1, -x - right, 0, 16), Position = UDim2.new(0, x, 0, subtitle and 9 or 12), BackgroundTransparency = 1, Parent = row})
+    mk("UIListLayout", {FillDirection = Enum.FillDirection.Horizontal, VerticalAlignment = Enum.VerticalAlignment.Center, Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder, Parent = line})
+    mk("TextLabel", {Size = UDim2.new(0, 0, 1, 0), AutomaticSize = Enum.AutomaticSize.X, BackgroundTransparency = 1, Text = title, TextColor3 = C.Text, Font = Enum.Font.GothamBold, TextSize = 12, LayoutOrder = 1, Parent = line})
+    if risk then
+        local badge = mk("TextLabel", {Size = UDim2.fromOffset(46, 14), BackgroundColor3 = C.Warn, BackgroundTransparency = 0.82, Text = "RIESGO", TextColor3 = C.Warn, Font = Enum.Font.GothamBlack, TextSize = 8, LayoutOrder = 2, Parent = line})
+        corner(badge, 999)
+    end
+    if subtitle then
+        mk("TextLabel", {Size = UDim2.new(1, -x - right, 0, 14), Position = UDim2.new(0, x, 0, 27), BackgroundTransparency = 1, Text = subtitle, TextColor3 = C.Dim, Font = Enum.Font.GothamSemibold, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = row})
+    end
+end
+
+-- PC: al pasar el mouse la fila se aclara un poco
+local function hover(row)
+    row.MouseEnter:Connect(function() tween(row, 0.15, {BackgroundTransparency = CARD_ALPHA - 0.06}) end)
+    row.MouseLeave:Connect(function() tween(row, 0.2, {BackgroundTransparency = CARD_ALPHA}) end)
+end
+
+local function toggle(tab, key, title, subtitle, dotColor, onChange, risk)
+    local row = mk("TextButton", {Size = UDim2.new(1, 0, 0, subtitle and 50 or 40), BackgroundColor3 = C.Glass, BackgroundTransparency = CARD_ALPHA, AutoButtonColor = false, Text = "", LayoutOrder = nextOrder(tab), Parent = tab.page})
+    corner(row, 12)
+    local rowStroke = stroke(row, C.Stroke, 0.5)
+    hover(row)
+    local x = 12
+    if dotColor then
+        local dot = mk("Frame", {Size = UDim2.fromOffset(10, 10), Position = UDim2.new(0, 12, 0.5, -5), BackgroundColor3 = dotColor, BorderSizePixel = 0, Parent = row})
+        corner(dot, 999)
+        x = 30
+    end
+    labels(row, title, subtitle, x, 60, risk)
+    local switch = mk("Frame", {Size = UDim2.fromOffset(40, 22), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -10, 0.5, 0), BackgroundColor3 = C.Off, BorderSizePixel = 0, Parent = row})
+    corner(switch, 999)
+    local knob = mk("Frame", {Size = UDim2.fromOffset(16, 16), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 3, 0.5, 0), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0, Parent = switch})
+    corner(knob, 999)
+    local function paint(animate)
+        local on = Config[key]
+        local t = animate and 0.25 or 0
+        tween(switch, t, {BackgroundColor3 = on and C.On or C.Off})
+        tween(knob, t, {Position = on and UDim2.new(1, -19, 0.5, 0) or UDim2.new(0, 3, 0.5, 0)}, Enum.EasingStyle.Back)
+        tween(rowStroke, t, {Color = on and C.On or C.Stroke, Transparency = on and 0.35 or 0.5})
+    end
+    row.MouseButton1Click:Connect(function()
+        Config[key] = not Config[key]
+        paint(true)
+        saveConfig()
+        if onChange then pcall(onChange, Config[key]) end
+    end)
+    paint(false)
+end
+
+local function slider(tab, key, title, minValue, maxValue, step, suffix, zeroText, onChange, subtitle)
+    local row = mk("Frame", {Size = UDim2.new(1, 0, 0, subtitle and 66 or 58), BackgroundColor3 = C.Glass, BackgroundTransparency = CARD_ALPHA, BorderSizePixel = 0, LayoutOrder = nextOrder(tab), Parent = tab.page})
+    corner(row, 12)
+    stroke(row, C.Stroke, 0.5)
+    labels(row, title, subtitle, 12, 90)
+    local valueLabel = mk("TextLabel", {Size = UDim2.fromOffset(80, 16), AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -12, 0, 9), BackgroundTransparency = 1, Text = "", TextColor3 = C.Accent, Font = Enum.Font.GothamBlack, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Right, Parent = row})
+    local barY = subtitle and 48 or 38
+    local bar = mk("Frame", {Size = UDim2.new(1, -24, 0, 6), Position = UDim2.fromOffset(12, barY), BackgroundColor3 = C.Field, BorderSizePixel = 0, Parent = row})
+    corner(bar, 99)
+    local fill = mk("Frame", {Size = UDim2.new(0, 0, 1, 0), BackgroundColor3 = C.Accent, BorderSizePixel = 0, Parent = bar})
+    corner(fill, 99)
+    local thumb = mk("Frame", {Size = UDim2.fromOffset(16, 16), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0, 0, 0.5, 0), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0, Parent = bar})
+    corner(thumb, 999)
+    stroke(thumb, C.Accent, 0.2)
+    local function paint()
+        local value = Config[key]
+        local alpha = math.clamp((value - minValue) / (maxValue - minValue), 0, 1)
+        fill.Size = UDim2.new(alpha, 0, 1, 0)
+        thumb.Position = UDim2.new(alpha, 0, 0.5, 0)
+        valueLabel.Text = (zeroText and value == minValue) and tr(zeroText) or (tostring(value) .. (suffix or ""))
+    end
+    local dragging = false
+    local function setFrom(x)
+        local alpha = math.clamp((x - bar.AbsolutePosition.X) / math.max(bar.AbsoluteSize.X, 1), 0, 1)
+        local value = minValue + (maxValue - minValue) * alpha
+        value = math.floor(value / step + 0.5) * step
+        if value ~= Config[key] then
+            Config[key] = value
+            paint()
+            if onChange then pcall(onChange, value) end
         end
-        if not on then
-            pcall(UA.Disable)
-            return
+    end
+    local hit = mk("TextButton", {Size = UDim2.new(1, 0, 0, 30), Position = UDim2.fromOffset(0, barY - 12), BackgroundTransparency = 1, Text = "", Parent = row})
+    hit.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            setFrom(input.Position.X)
         end
-        local logStart = type(UA.Log) == "table" and #UA.Log or 0
-        pcall(UA.Enable)
-        Unlock.Waiting = Unlock.Waiting + 1
-        local token = Unlock.Waiting
-        -- se activa en segundo plano: espera el resultado (hasta 20 s) y avisa
-        task.spawn(function()
-            local t0 = os.clock()
-            while os.clock() - t0 < 20 and token == Unlock.Waiting do
-                local okOn, isOn = pcall(UA.IsEnabled)
-                if okOn and isOn then
-                    Hydra:Notify(Hydra:T("Unlock All activo"))
-                    if Unlock.AutoLook then task.wait(0.5) Unlock.loadLook() end
-                    local boombox = Hydra.Options.uaBoombox and Hydra.Options.uaBoombox:Get()
-                    if boombox ~= nil then pcall(UA.SetBoombox, boombox) end
-                    return
-                end
-                -- si el modulo aviso que aborto o fallo desde que se pidio activar, no se espera mas
-                local failed = false
-                for i = logStart + 1, (type(UA.Log) == "table" and #UA.Log or 0) do
-                    local line = tostring(UA.Log[i]):gsub("^%[Hydra%-UnlockAll%]%s*", "")
-                    if string.find(line, "^ABORTADO") or string.find(line, "^FALLO") then failed = true end
-                end
-                if failed then break end
-                task.wait(0.3)
-            end
-            if token ~= Unlock.Waiting then return end
-            Hydra:Notify(Hydra:T("Unlock All no se pudo activar"))
-            task.defer(function() UnlockToggle:Set(false, true) end)
+    end)
+    track(UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            setFrom(input.Position.X)
+        end
+    end))
+    track(UserInputService.InputEnded:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
+            dragging = false
+            saveConfig()
+        end
+    end))
+    paint()
+end
+
+-- boton de accion (fila con icono a la derecha)
+local function actionButton(tab, title, subtitle, icon, onClick, risk)
+    local row = mk("TextButton", {Size = UDim2.new(1, 0, 0, subtitle and 50 or 40), BackgroundColor3 = C.Glass, BackgroundTransparency = CARD_ALPHA, AutoButtonColor = false, Text = "", LayoutOrder = nextOrder(tab), Parent = tab.page})
+    corner(row, 12)
+    stroke(row, C.Stroke, 0.5)
+    labels(row, title, subtitle, 12, 52, risk)
+    hover(row)
+    local iconBox = mk("Frame", {Size = UDim2.fromOffset(30, 30), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -10, 0.5, 0), BackgroundColor3 = C.Field, BorderSizePixel = 0, Parent = row})
+    corner(iconBox, 9)
+    local iconLabel, iconProp = mkIcon(icon or "\226\158\164", C.Accent, {Size = UDim2.fromOffset(18, 18), Position = UDim2.new(0.5, -9, 0.5, -9), ScaleType = Enum.ScaleType.Fit, Parent = iconBox},
+        {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Font = Enum.Font.GothamBold, TextSize = 14, Parent = iconBox})
+    row.MouseButton1Click:Connect(function()
+        tween(iconBox, 0.08, {BackgroundColor3 = C.Accent})
+        tween(iconLabel, 0.08, {[iconProp] = Color3.new(1, 1, 1)})
+        task.delay(0.2, function()
+            tween(iconBox, 0.3, {BackgroundColor3 = C.Field})
+            tween(iconLabel, 0.3, {[iconProp] = C.Accent})
         end)
-    end})
--- tipos que se desbloquean
-for _, kind in ipairs({
-    {"Cosmetic", "Cosm\195\169ticos"}, {"Character", "Personajes"}, {"Unusual", "Unusuals"}, {"Perk", "Perks"},
-    {"CarryAnimation", "Animaci\195\179n de cargar"}, {"Nametag", "Nametags"}, {"Boombox", "Boombox"},
-}) do
-    local typeName = kind[1]
-    UnlockToggle:Toggle({Id = "uaType" .. typeName, Title = kind[2], Default = true,
-        Callback = function(on) if UA then pcall(UA.SetType, typeName, on) end end})
+        if onClick then
+            local ok, err = pcall(onClick)
+            if not ok then toast("Error: " .. tostring(err), C.Accent) end
+        end
+    end)
 end
--- tambien en partida (Perk, Nametag, Boombox)
-for _, kind in ipairs({{"Perk", "Perk en partida"}, {"Nametag", "Nametag en partida"}, {"Boombox", "Boombox en partida"}}) do
-    local typeName = kind[1]
-    UnlockToggle:Toggle({Id = "uaInGame" .. typeName, Title = kind[2], Desc = "Tambi\195\169n se ve durante la ronda", Default = true,
-        Callback = function(on) if UA then pcall(UA.SetInGame, typeName, on) end end})
+
+-- desplegable (lista que se abre debajo de la fila)
+local function dropdown(tab, title, subtitle, getOptions, onSelect)
+    local row = mk("Frame", {Size = UDim2.new(1, 0, 0, 50), BackgroundColor3 = C.Glass, BackgroundTransparency = CARD_ALPHA, BorderSizePixel = 0, LayoutOrder = nextOrder(tab), Parent = tab.page})
+    corner(row, 12)
+    stroke(row, C.Stroke, 0.5)
+    labels(row, title, subtitle, 12, 160)
+    local pill = mk("TextButton", {Size = UDim2.fromOffset(144, 30), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -10, 0.5, 0), BackgroundColor3 = C.Field, AutoButtonColor = false, Text = "", Parent = row})
+    corner(pill, 10)
+    stroke(pill, C.Stroke, 0.4)
+    local pillText = mk("TextLabel", {Size = UDim2.new(1, -32, 1, 0), Position = UDim2.fromOffset(10, 0), BackgroundTransparency = 1, Text = "\226\128\148", TextColor3 = C.Text, Font = Enum.Font.GothamBold, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = pill})
+    local arrow = mk("TextLabel", {Size = UDim2.fromOffset(20, 30), AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -6, 0, 0), BackgroundTransparency = 1, Text = "\226\150\190", TextColor3 = C.Dim, Font = Enum.Font.GothamBold, TextSize = 14, Parent = pill})
+    local list = mk("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = C.Field, BorderSizePixel = 0, Visible = false, LayoutOrder = nextOrder(tab), Parent = tab.page})
+    corner(list, 12)
+    stroke(list, C.Stroke, 0.5)
+    mk("UIListLayout", {Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder, Parent = list})
+    mk("UIPadding", {PaddingTop = UDim.new(0, 6), PaddingBottom = UDim.new(0, 6), PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6), Parent = list})
+    local api = {value = nil}
+    local function close()
+        list.Visible = false
+        arrow.Text = "\226\150\190"
+    end
+    local function open()
+        for _, child in ipairs(list:GetChildren()) do
+            if child:IsA("GuiObject") then child:Destroy() end
+        end
+        local options = getOptions()
+        if #options == 0 then
+            mk("TextLabel", {Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1, Text = "No hay nada para elegir", TextColor3 = C.Dim, Font = Enum.Font.GothamMedium, TextSize = 11, Parent = list})
+        end
+        for index, option in ipairs(options) do
+            local selected = option.value == api.value
+            local item = mk("TextButton", {Size = UDim2.new(1, 0, 0, 30), BackgroundColor3 = selected and C.AccentSoft or C.Card, BackgroundTransparency = CARD_ALPHA, AutoButtonColor = false, Text = "", LayoutOrder = index, Parent = list})
+            corner(item, 9)
+            if option.color then
+                local dot = mk("Frame", {Size = UDim2.fromOffset(8, 8), Position = UDim2.new(0, 10, 0.5, -4), BackgroundColor3 = option.color, BorderSizePixel = 0, Parent = item})
+                corner(dot, 999)
+            end
+            mk("TextLabel", {Size = UDim2.new(1, -34, 1, 0), Position = UDim2.fromOffset(26, 0), BackgroundTransparency = 1, Text = option.text, TextColor3 = C.Text, Font = Enum.Font.GothamBold, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = item})
+            item.MouseButton1Click:Connect(function()
+                api.value = option.value
+                pillText.Text = option.short or option.text
+                close()
+                if onSelect then pcall(onSelect, option.value) end
+            end)
+        end
+        list.Visible = true
+        arrow.Text = "\226\150\180"
+    end
+    pill.MouseButton1Click:Connect(function()
+        if list.Visible then close() else open() end
+    end)
+    function api.clear()
+        api.value = nil
+        pillText.Text = "\226\128\148"
+    end
+    function api.set(value, text)
+        api.value = value
+        pillText.Text = text or "\226\128\148"
+    end
+    return api
 end
-UnlockToggle:Dropdown({Id = "uaBoombox", Title = "Skin del boombox", Desc = "Eleg\195\173 cualquiera",
-    Options = function()
-        local list = {}
-        if UA then
-            local ok, skins = pcall(UA.GetBoomboxSkins)
-            if ok and type(skins) == "table" then
-                for _, skin in ipairs(skins) do list[#list + 1] = {value = skin.id, text = skin.name} end
+
+local function infoCard(tab, rows)
+    local card = mk("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = C.Glass, BackgroundTransparency = CARD_ALPHA, BorderSizePixel = 0, LayoutOrder = nextOrder(tab), Parent = tab.page})
+    corner(card, 12)
+    stroke(card, C.Stroke, 0.5)
+    mk("UIPadding", {PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8), PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12), Parent = card})
+    mk("UIListLayout", {Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder, Parent = card})
+    local values = {}
+    for index, title in ipairs(rows) do
+        local line = mk("Frame", {Size = UDim2.new(1, 0, 0, 18), BackgroundTransparency = 1, LayoutOrder = index, Parent = card})
+        mk("TextLabel", {Size = UDim2.new(0.5, 0, 1, 0), BackgroundTransparency = 1, Text = title, TextColor3 = C.Dim, Font = Enum.Font.GothamMedium, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left, Parent = line})
+        values[title] = mk("TextLabel", {Size = UDim2.new(0.5, 0, 1, 0), Position = UDim2.fromScale(0.5, 0), BackgroundTransparency = 1, Text = "\226\128\148", TextColor3 = C.Text, Font = Enum.Font.GothamBold, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Right, TextTruncate = Enum.TextTruncate.AtEnd, Parent = line})
+    end
+    return values
+end
+
+local function note(tab, text)
+    mk("TextLabel", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, Text = text, TextColor3 = C.Dim, Font = Enum.Font.GothamSemibold, TextSize = 11, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = nextOrder(tab), Parent = tab.page})
+end
+
+-- ---------- pestanas y opciones ----------
+local TabHome = createTab(1, "Home", "\226\140\130", "INICIO")
+local TabSettings = createTab(2, "Settings", "\226\154\153", "AJUSTES")
+
+-- INICIO
+local Home = {start = os.clock(), frames = 0, acc = 0, fps = 0, bars = {}, history = {}, values = {}}
+do
+    local function service(name)
+        local ok, found = pcall(function() return game:GetService(name) end)
+        return ok and found or nil
+    end
+    Home.stats, Home.market, Home.teleport = service("Stats"), service("MarketplaceService"), service("TeleportService")
+
+    -- tarjeta de bienvenida
+    local hero = mk("Frame", {Size = UDim2.new(1, 0, 0, 108), BackgroundColor3 = C.Glass, BackgroundTransparency = CARD_ALPHA, BorderSizePixel = 0, ClipsDescendants = true, LayoutOrder = nextOrder(TabHome), Parent = TabHome.page})
+    corner(hero, 16)
+    stroke(hero, C.Stroke, 0.45)
+    -- franja de luz diagonal que cruza la tarjeta de vez en cuando
+    local shine = mk("Frame", {Size = UDim2.new(0, 60, 2, 0), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(-0.2, 0, 0.5, 0), Rotation = 18, BackgroundColor3 = Color3.new(1, 1, 1), BackgroundTransparency = 0.93, BorderSizePixel = 0, Parent = hero})
+    mk("UIGradient", {Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.5, 0), NumberSequenceKeypoint.new(1, 1)}), Parent = shine})
+    TweenService:Create(shine, TweenInfo.new(2.4, Enum.EasingStyle.Quint, Enum.EasingDirection.InOut, -1, false, 3.5), {Position = UDim2.new(1.2, 0, 0.5, 0)}):Play()
+    -- resplandor del acento en la esquina
+    local glow = mk("Frame", {Size = UDim2.fromOffset(220, 220), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(1, -20, 0, 0), BackgroundColor3 = C.Accent, BackgroundTransparency = 0.8, BorderSizePixel = 0, Parent = hero})
+    corner(glow, 999)
+    mk("UIGradient", {Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.6, 0.55), NumberSequenceKeypoint.new(1, 1)}), Rotation = 45, Parent = glow})
+
+    -- avatar con anillo que gira
+    local ring = mk("Frame", {Size = UDim2.fromOffset(70, 70), Position = UDim2.new(0, 16, 0.5, -35), BackgroundColor3 = C.Field, BorderSizePixel = 0, Parent = hero})
+    corner(ring, 999)
+    local ringStroke = mk("UIStroke", {Color = Color3.new(1, 1, 1), Thickness = 2.5, Parent = ring})
+    local ringGradient = mk("UIGradient", {Color = ColorSequence.new({ColorSequenceKeypoint.new(0, C.Accent), ColorSequenceKeypoint.new(0.5, C.Field), ColorSequenceKeypoint.new(1, C.Accent)}), Rotation = 0, Parent = ringStroke})
+    Home.ringGradient = ringGradient
+    local avatar = mk("ImageLabel", {Size = UDim2.new(1, -8, 1, -8), Position = UDim2.fromOffset(4, 4), BackgroundColor3 = C.AccentSoft, BorderSizePixel = 0, Image = "", ScaleType = Enum.ScaleType.Crop, Parent = ring})
+    corner(avatar, 999)
+    local online = mk("Frame", {Size = UDim2.fromOffset(14, 14), AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -2, 1, -2), BackgroundColor3 = C.Good, BorderSizePixel = 0, ZIndex = 3, Parent = ring})
+    corner(online, 999)
+    mk("UIStroke", {Color = C.Card, Thickness = 2.5, Parent = online})
+    task.spawn(function()
+        local ok, image = pcall(function()
+            return Players:GetUserThumbnailAsync(LocalPlayer.UserId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size150x150)
+        end)
+        if ok and type(image) == "string" and avatar.Parent then avatar.Image = image end
+    end)
+
+    -- saludo segun la hora
+    local function greetingKey()
+        local hour = tonumber(os.date("%H")) or 12
+        if hour >= 6 and hour < 12 then return "Buenos d\195\173as" end
+        if hour >= 12 and hour < 20 then return "Buenas tardes" end
+        return "Buenas noches"
+    end
+    Home.greeting = mk("TextLabel", {Size = UDim2.new(1, -112, 0, 24), Position = UDim2.fromOffset(100, 20), BackgroundTransparency = 1, Text = "", TextColor3 = C.Text, Font = Enum.Font.GothamBlack, TextSize = 18, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = hero})
+    mk("TextLabel", {Size = UDim2.new(1, -112, 0, 14), Position = UDim2.fromOffset(100, 45), BackgroundTransparency = 1, Text = "@" .. LocalPlayer.Name, TextColor3 = C.Dim, Font = Enum.Font.GothamMedium, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = hero})
+    local function chip(x)
+        local frame = mk("Frame", {Size = UDim2.fromOffset(0, 20), AutomaticSize = Enum.AutomaticSize.X, Position = UDim2.fromOffset(x, 68), BackgroundColor3 = C.AccentSoft, BackgroundTransparency = 0.2, BorderSizePixel = 0, Parent = hero})
+        corner(frame, 999)
+        mk("UIPadding", {PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8), Parent = frame})
+        mk("UIListLayout", {FillDirection = Enum.FillDirection.Horizontal, VerticalAlignment = Enum.VerticalAlignment.Center, Padding = UDim.new(0, 5), Parent = frame})
+        local dot = mk("Frame", {Size = UDim2.fromOffset(6, 6), BackgroundColor3 = C.Accent, BorderSizePixel = 0, Parent = frame})
+        corner(dot, 999)
+        local label = mk("TextLabel", {Size = UDim2.new(0, 0, 1, 0), AutomaticSize = Enum.AutomaticSize.X, BackgroundTransparency = 1, Text = "", TextColor3 = C.Accent, Font = Enum.Font.GothamBold, TextSize = 10, Parent = frame})
+        return frame, label, dot
+    end
+    local onlineChip, onlineLabel = chip(100)
+    Home.onlineLabel = onlineLabel
+    local sessionChip, sessionLabel = chip(100)
+    Home.sessionLabel = sessionLabel
+    -- el segundo chip se acomoda al lado del primero
+    local function placeChips() sessionChip.Position = UDim2.fromOffset(100 + onlineChip.AbsoluteSize.X / math.max(WindowScale.Scale, 0.05) + 6, 68) end
+    track(onlineChip:GetPropertyChangedSignal("AbsoluteSize"):Connect(placeChips))
+
+    function Home.refreshTexts()
+        Home.greeting.Text = tr(greetingKey()) .. ", " .. LocalPlayer.DisplayName
+        onlineLabel.Text = tr("En l\195\173nea")
+    end
+    Home.refreshTexts()
+
+    -- tarjetas de datos en vivo (2 x 2)
+    section(TabHome, "Rendimiento", "\226\151\183")
+    local grid = mk("Frame", {Size = UDim2.new(1, 0, 0, 144), BackgroundTransparency = 1, LayoutOrder = nextOrder(TabHome), Parent = TabHome.page})
+    mk("UIGridLayout", {CellSize = UDim2.new(0.5, -4, 0, 68), CellPadding = UDim2.fromOffset(8, 8), SortOrder = Enum.SortOrder.LayoutOrder, Parent = grid})
+    local function tile(order, caption, glyph)
+        local card = mk("Frame", {BackgroundColor3 = C.Glass, BackgroundTransparency = CARD_ALPHA, BorderSizePixel = 0, ClipsDescendants = true, LayoutOrder = order, Parent = grid})
+        corner(card, 14)
+        stroke(card, C.Stroke, 0.5)
+        local badge = mk("Frame", {Size = UDim2.fromOffset(22, 22), Position = UDim2.fromOffset(10, 10), BackgroundColor3 = C.AccentSoft, BorderSizePixel = 0, Parent = card})
+        corner(badge, 7)
+        mkIcon(glyph, C.Accent, {Size = UDim2.fromOffset(14, 14), Position = UDim2.fromOffset(4, 4), ScaleType = Enum.ScaleType.Fit, Parent = badge},
+            {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Font = Enum.Font.GothamBold, TextSize = 12, Parent = badge})
+        mk("TextLabel", {Size = UDim2.new(1, -44, 0, 22), Position = UDim2.fromOffset(38, 10), BackgroundTransparency = 1, Text = caption, TextColor3 = C.Dim, Font = Enum.Font.GothamBold, TextSize = 10, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = card})
+        local value = mk("TextLabel", {Size = UDim2.new(1, -20, 0, 24), Position = UDim2.fromOffset(10, 36), BackgroundTransparency = 1, Text = "\226\128\148", TextColor3 = C.Text, Font = Enum.Font.GothamBlack, TextSize = 18, TextXAlignment = Enum.TextXAlignment.Left, Parent = card})
+        return card, value
+    end
+    local fpsCard
+    fpsCard, Home.values.fps = tile(1, "FPS", "\226\151\183")
+    _, Home.values.ping = tile(2, "Ping", "\226\151\142")
+    _, Home.values.players = tile(3, "Jugadores", "\226\156\166")
+    _, Home.values.uptime = tile(4, "Servidor abierto hace", "\226\150\162")
+    -- mini grafico de FPS de los ultimos segundos
+    local graph = mk("Frame", {Size = UDim2.fromOffset(66, 24), AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -10, 1, -10), BackgroundTransparency = 1, Parent = fpsCard})
+    mk("UIListLayout", {FillDirection = Enum.FillDirection.Horizontal, VerticalAlignment = Enum.VerticalAlignment.Bottom, Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder, Parent = graph})
+    for i = 1, 16 do
+        local bar = mk("Frame", {Size = UDim2.new(0, 2, 0, 2), BackgroundColor3 = C.Accent, BackgroundTransparency = 0.25, BorderSizePixel = 0, LayoutOrder = i, Parent = graph})
+        corner(bar, 2)
+        Home.bars[i] = bar
+    end
+
+    -- datos de la partida
+    section(TabHome, "Partida", "\226\156\142")
+    Home.info = infoCard(TabHome, {"Juego", "Ejecutor", "Versi\195\179n"})
+    Home.info["Versi\195\179n"].Text = "Hydra 1.0"
+    do
+        local name = "?"
+        pcall(function()
+            local a, b = identifyexecutor()
+            name = tostring(a) .. (b and (" " .. tostring(b)) or "")
+        end)
+        Home.info["Ejecutor"].Text = name
+    end
+    task.spawn(function()
+        local ok, product = pcall(function() return Home.market:GetProductInfo(game.PlaceId) end)
+        local label = Home.info["Juego"]
+        if label.Parent then label.Text = (ok and type(product) == "table" and product.Name) or tostring(game.PlaceId) end
+    end)
+
+    -- accesos rapidos
+    section(TabHome, "Accesos r\195\161pidos", "\226\158\164")
+    local quick = mk("Frame", {Size = UDim2.new(1, 0, 0, 58), BackgroundTransparency = 1, LayoutOrder = nextOrder(TabHome), Parent = TabHome.page})
+    mk("UIGridLayout", {CellSize = UDim2.new(1 / 3, -6, 1, 0), CellPadding = UDim2.fromOffset(8, 0), SortOrder = Enum.SortOrder.LayoutOrder, Parent = quick})
+    local function quickButton(order, glyph, caption, onClick)
+        local button = mk("TextButton", {BackgroundColor3 = C.Glass, BackgroundTransparency = CARD_ALPHA, AutoButtonColor = false, Text = "", LayoutOrder = order, Parent = quick})
+        corner(button, 14)
+        local buttonStroke = stroke(button, C.Stroke, 0.5)
+        hover(button)
+        local scale = mk("UIScale", {Scale = 1, Parent = button})
+        mkIcon(glyph, C.Accent, {Size = UDim2.fromOffset(18, 18), Position = UDim2.new(0.5, -9, 0, 9), ScaleType = Enum.ScaleType.Fit, Parent = button},
+            {Size = UDim2.new(1, 0, 0, 22), Position = UDim2.fromOffset(0, 7), BackgroundTransparency = 1, Font = Enum.Font.GothamBold, TextSize = 16, Parent = button})
+        mk("TextLabel", {Size = UDim2.new(1, -8, 0, 14), Position = UDim2.new(0, 4, 1, -20), BackgroundTransparency = 1, Text = caption, TextColor3 = C.Text, Font = Enum.Font.GothamBold, TextSize = 10, TextTruncate = Enum.TextTruncate.AtEnd, Parent = button})
+        button.MouseButton1Down:Connect(function() tween(scale, 0.08, {Scale = 0.94}) end)
+        button.MouseButton1Up:Connect(function() tween(scale, 0.3, {Scale = 1}, Enum.EasingStyle.Back) end)
+        button.MouseLeave:Connect(function() tween(scale, 0.3, {Scale = 1}, Enum.EasingStyle.Back) end)
+        button.MouseButton1Click:Connect(function()
+            tween(buttonStroke, 0.08, {Color = C.Accent, Transparency = 0})
+            task.delay(0.25, function() tween(buttonStroke, 0.4, {Color = C.Stroke, Transparency = 0.5}) end)
+            local ok, err = pcall(onClick)
+            if not ok then toast("Error: " .. tostring(err), C.Bad) end
+        end)
+    end
+    quickButton(1, "\226\156\142", "Copiar servidor", function()
+        local copy = setclipboard or toclipboard
+        if type(copy) ~= "function" then toast(tr("Tu ejecutor no puede copiar"), C.Bad) return end
+        copy(tostring(game.JobId))
+        toast(tr("ID del servidor copiado"), C.Accent)
+    end)
+    quickButton(2, "\226\158\164", "Reentrar", function()
+        toast(tr("Reentrando..."), C.Accent)
+        local ok = pcall(function() Home.teleport:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer) end)
+        if not ok then toast(tr("No se pudo reentrar"), C.Bad) end
+    end)
+    quickButton(3, "\226\154\153", "Idioma", function() selectTab("Settings") end)
+end
+
+-- datos en vivo: FPS siempre (chip de la cabecera); el resto solo con la pestana Inicio abierta
+local function fpsColor(fps)
+    if fps >= 50 then return C.Good end
+    if fps >= 30 then return C.Mid end
+    return C.Bad
+end
+local function clockText(seconds)
+    seconds = math.max(0, math.floor(seconds))
+    local h, m, sec = math.floor(seconds / 3600), math.floor(seconds / 60) % 60, seconds % 60
+    if h > 0 then return string.format("%d:%02d:%02d", h, m, sec) end
+    return string.format("%02d:%02d", m, sec)
+end
+track(RunService.Heartbeat:Connect(function(dt)
+    Home.frames = Home.frames + 1
+    Home.acc = Home.acc + dt
+    if Home.ringGradient and Window.Visible then Home.ringGradient.Rotation = (Home.ringGradient.Rotation + dt * 90) % 360 end
+    if Home.acc < 0.5 then return end
+    Home.fps = math.floor(Home.frames / Home.acc + 0.5)
+    Home.frames, Home.acc = 0, 0
+    table.insert(Home.history, Home.fps)
+    if #Home.history > #Home.bars then table.remove(Home.history, 1) end
+    if not Window.Visible then return end
+    local color = fpsColor(Home.fps)
+    ChipText.Text = Home.fps .. " FPS"
+    ChipText.TextColor3 = color
+    ChipDot.BackgroundColor3 = color
+    ChipStroke.Color = color
+    if currentTab ~= "Home" then return end
+    Home.values.fps.Text = Home.fps .. " FPS"
+    Home.values.fps.TextColor3 = color
+    for i, bar in ipairs(Home.bars) do
+        local value = Home.history[#Home.history - #Home.bars + i]
+        bar.Size = UDim2.new(0, 2, 0, value and math.clamp(math.floor(value / 60 * 24), 2, 24) or 2)
+        bar.BackgroundColor3 = value and fpsColor(value) or C.Off
+    end
+    local ping
+    pcall(function() ping = math.floor(Home.stats.Network.ServerStatsItem["Data Ping"]:GetValue() + 0.5) end)
+    Home.values.ping.Text = ping and (ping .. " ms") or "\226\128\148"
+    Home.values.ping.TextColor3 = not ping and C.Text or (ping < 120 and C.Good or (ping < 250 and C.Mid or C.Bad))
+    Home.values.players.Text = #Players:GetPlayers() .. " / " .. tostring(Players.MaxPlayers)
+    Home.values.uptime.Text = clockText(workspace.DistributedGameTime)
+    Home.sessionLabel.Text = tr("Sesi\195\179n") .. " " .. clockText(os.clock() - Home.start)
+end))
+
+-- AJUSTES
+section(TabSettings, "Idioma", "\226\156\142")
+local LANGUAGE_NAMES = {auto = "Autom\195\161tico", es = "Espa\195\177ol", en = "English"}
+local LanguagePicker = dropdown(TabSettings, "Idioma", "Autom\195\161tico = el idioma de tu Roblox", function()
+    return {
+        {value = "auto", text = tr("Autom\195\161tico")},
+        {value = "es", text = "Espa\195\177ol"},
+        {value = "en", text = "English"},
+    }
+end, function(value)
+    Config.language = value
+    saveConfig()
+    applyLanguage()
+end)
+LanguagePicker.set(Config.language, tr(LANGUAGE_NAMES[Config.language] or "Autom\195\161tico"))
+section(TabSettings, "Ventana", "\226\150\162")
+note(TabSettings, "Bot\195\179n \226\128\147 : esconde la ventana. Toc\195\161 el bot\195\179n flotante para volver a abrirla. En PC tambi\195\169n con la tecla K. La \226\156\149 cierra el script.")
+
+relayoutCarousel()
+selectTab("Home")
+-- al cambiar el idioma: titulo de la pestana y nombres elegidos
+Lang.onChange = function()
+    if currentTab then HeaderSub.Text = tr(TabTitles[currentTab] or currentTab) end
+    Home.refreshTexts()
+    LanguagePicker.set(Config.language, tr(LANGUAGE_NAMES[Config.language] or "Autom\195\161tico"))
+end
+
+-- ---------- boton flotante para reabrir ----------
+local Bubble = mk("TextButton", {Size = UDim2.fromOffset(73, 73), Position = UDim2.new(0, 16, 0.5, -36), BackgroundColor3 = C.Accent, AutoButtonColor = false, Text = "H", TextColor3 = Color3.new(1, 1, 1), Font = Enum.Font.GothamBold, TextSize = 22, Visible = false, Parent = Gui})
+corner(Bubble, 999)
+local BubbleStroke = stroke(Bubble, Color3.new(1, 1, 1), 0.6)
+-- logo del boton flotante; mientras no cargue (o si falla) se queda la H
+local BubbleLogo = mk("ImageLabel", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Image = "rbxassetid://114974832117287", ScaleType = Enum.ScaleType.Crop, Parent = Bubble})
+corner(BubbleLogo, 999)
+-- con logo se ve solo la imagen, sin circulo ni borde. Si el logo no carga a los 5 s de aparecer el boton, vuelve la H con su circulo.
+if BubbleLogo.Image ~= "" then
+    Bubble.Text = ""
+    Bubble.BackgroundTransparency = 1
+    BubbleStroke.Transparency = 1
+    local checked = false
+    Bubble:GetPropertyChangedSignal("Visible"):Connect(function()
+        if checked or not Bubble.Visible then return end
+        checked = true
+        task.delay(5, function()
+            -- si el logo no carga, solo se muestra la H (sin circulo de fondo)
+            if Bubble.Parent and not BubbleLogo.IsLoaded then Bubble.Text = "H" end
+        end)
+    end)
+end
+
+local function setWindowVisible(visible)
+    if visible then
+        Window.Visible = true
+        Bubble.Visible = false
+        WindowScale.Scale = 0.9
+        tween(WindowScale, 0.3, {Scale = 1}, Enum.EasingStyle.Back)
+    else
+        tween(WindowScale, 0.15, {Scale = 0.9})
+        task.delay(0.15, function()
+            Window.Visible = false
+            Bubble.Visible = true
+        end)
+    end
+end
+HideButton.MouseButton1Click:Connect(function() setWindowVisible(false) end)
+
+-- arrastrar (ventana desde la cabecera y burbuja)
+local function draggable(handle, target, onTap)
+    local dragging, dragStart, startPos, moved = false, nil, nil, false
+    handle.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging, dragStart, startPos, moved = true, input.Position, target.Position, false
+        end
+    end)
+    track(UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            if delta.Magnitude > 6 then moved = true end
+            target.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
+    end))
+    track(UserInputService.InputEnded:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
+            dragging = false
+            if not moved and onTap then onTap() end
+        end
+    end))
+end
+draggable(Header, Window)
+draggable(Bubble, Bubble, function() setWindowVisible(true) end)
+
+track(UserInputService.InputBegan:Connect(function(input, processed)
+    if processed then return end
+    if input.KeyCode == Enum.KeyCode.K then setWindowVisible(not Window.Visible) end
+end))
+
+-- ==================== ARRANQUE Y CIERRE ====================
+CloseButton.MouseButton1Click:Connect(function()
+    for _, connection in ipairs(Connections) do pcall(function() connection:Disconnect() end) end
+    tween(WindowScale, 0.18, {Scale = 0.85})
+    task.delay(0.2, function()
+        Gui:Destroy()
+    end)
+    loadConfig() -- se recupera la configuracion guardada (para la proxima vez), sin aplicarla
+end)
+
+-- ==================== HYDRA: API PARA USAR LA LIBRERIA DESDE AFUERA ====================
+-- local Hydra = loadstring(...)()
+-- local Tab = Hydra:Tab({Title = "Movimiento", Caption = "MOVER", Icon = "rbxassetid://..."})
+-- Tab:Section("Salto", icono)
+-- local Bhop = Tab:Toggle({Id = "bhop", Title = "Bunny Hop", Desc = "...", Icon = "rbxassetid://...", Default = false,
+--     Keybind = true, Floating = true, Callback = function(on) end})
+-- Bhop:Slider({Id = "bhopAccel", Title = "Aceleracion", Min = -3, Max = 0, Step = 0.1, Default = -0.2, Suffix = "", Callback = function(v) end})
+-- Bhop:Toggle({Id = "bhopHold", Title = "Mantener salto", Callback = function(on) end})   -- sub-opciones dentro del desplegable
+-- Tab:Slider({...})  -- slider suelto, misma forma
+-- Cada opcion devuelve :Set(valor), :Get() y guarda su valor solo (Config.flags).
+local Hydra = {Options = {}, Binds = {}, Floats = {}}
+Config.flags, Config.binds, Config.floats = Config.flags or {}, Config.binds or {}, Config.floats or {}
+
+local function keyName(code)
+    if not code then return "\226\128\148" end
+    local name = tostring(code.Name or code)
+    local short = {LeftShift = "LShift", RightShift = "RShift", LeftControl = "LCtrl", RightControl = "RCtrl", LeftAlt = "LAlt", RightAlt = "RAlt", Space = "Space"}
+    return short[name] or name
+end
+
+function Hydra.formatValue(value, step)
+    local decimals = 0
+    local text = tostring(step or 1)
+    local dot = string.find(text, "%.")
+    if dot then decimals = #text - dot end
+    return string.format("%." .. decimals .. "f", value)
+end
+
+-- pestana nueva: queda antes de Ajustes en el carrusel
+function Hydra:Tab(info)
+    local name = info.Id or info.Title
+    TabTitles[name] = info.Title
+    local tab = createTab(0, name, info.Icon or "\226\156\166", info.Caption or string.upper(info.Title))
+    local last = table.remove(Carousel.items)
+    local at = #Carousel.items + 1
+    for i, item in ipairs(Carousel.items) do
+        if item.name == "Settings" then at = i break end
+    end
+    table.insert(Carousel.items, at, last)
+    relayoutCarousel()
+    local api = {raw = tab}
+    function api:Section(title, icon) section(tab, title, icon or "\226\128\162") end
+    function api:Note(text) note(tab, text) end
+    function api:Toggle(o) return Hydra.toggle(tab.page, function() return nextOrder(tab) end, o, false) end
+    function api:Slider(o) return Hydra.slider(tab.page, function() return nextOrder(tab) end, o, false) end
+    function api:Button(o) return Hydra.button(tab.page, function() return nextOrder(tab) end, o, false) end
+    function api:Dropdown(o) return Hydra.dropdown(tab.page, function() return nextOrder(tab) end, o, false) end
+    function api:PlayerSearch(o) return Hydra.playerSearch(tab.page, function() return nextOrder(tab) end, o) end
+    return api
+end
+
+-- ---------- slider ----------
+function Hydra.slider(parent, order, o, nested)
+    local minValue, maxValue, step = o.Min or 0, o.Max or 100, o.Step or 1
+    local default = math.clamp(o.Default or minValue, minValue, maxValue)
+    local id = o.Id or o.Title
+    local value = tonumber(Config.flags[id]) or default
+    local card = mk("Frame", {Size = UDim2.new(1, 0, 0, o.Desc and 76 or 64), BackgroundColor3 = C.Glass, BackgroundTransparency = nested and 0.94 or CARD_ALPHA, BorderSizePixel = 0, LayoutOrder = order(), Parent = parent})
+    corner(card, nested and 11 or 14)
+    stroke(card, C.Stroke, nested and 0.65 or 0.5)
+    mk("TextLabel", {Size = UDim2.new(1, -150, 0, 16), Position = UDim2.fromOffset(14, 10), BackgroundTransparency = 1, Text = o.Title, TextColor3 = C.Text, Font = Enum.Font.GothamBold, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = card})
+    if o.Desc then
+        mk("TextLabel", {Size = UDim2.new(1, -150, 0, 13), Position = UDim2.fromOffset(14, 27), BackgroundTransparency = 1, Text = o.Desc, TextColor3 = C.Dim, Font = Enum.Font.GothamSemibold, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = card})
+    end
+    -- caja del valor (se puede escribir) + boton de reset
+    local box = mk("Frame", {Size = UDim2.fromOffset(74, 24), AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -12, 0, 9), BackgroundColor3 = C.Bg, BackgroundTransparency = 0.3, BorderSizePixel = 0, Parent = card})
+    corner(box, 8)
+    local boxStroke = stroke(box, C.Stroke, 0.5)
+    local input = mk("TextBox", {Size = UDim2.new(1, -10, 1, 0), Position = UDim2.fromOffset(5, 0), BackgroundTransparency = 1, Text = "", TextColor3 = C.Accent, Font = Enum.Font.GothamBlack, TextSize = 12, ClearTextOnFocus = false, Parent = box})
+    local reset = mk("TextButton", {Size = UDim2.fromOffset(44, 20), AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -92, 0, 11), BackgroundColor3 = C.AccentSoft, BackgroundTransparency = 1, AutoButtonColor = false, Text = "Reset", TextColor3 = C.Accent, TextTransparency = 1, Font = Enum.Font.GothamBold, TextSize = 9, Parent = card})
+    corner(reset, 999)
+    local barY = o.Desc and 52 or 42
+    local bar = mk("Frame", {Size = UDim2.new(1, -28, 0, 6), Position = UDim2.fromOffset(14, barY), BackgroundColor3 = C.Off, BorderSizePixel = 0, Parent = card})
+    corner(bar, 99)
+    local fill = mk("Frame", {Size = UDim2.new(0, 0, 1, 0), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0, Parent = bar})
+    corner(fill, 99)
+    mk("UIGradient", {Color = ColorSequence.new(C.AccentDark, C.Accent), Parent = fill})
+    local thumb = mk("Frame", {Size = UDim2.fromOffset(18, 18), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0, 0, 0.5, 0), BackgroundColor3 = C.Bg, BorderSizePixel = 0, ZIndex = 3, Parent = bar})
+    corner(thumb, 999)
+    local thumbStroke = mk("UIStroke", {Color = C.Accent, Thickness = 2.5, Parent = thumb})
+    local halo = mk("Frame", {Size = UDim2.fromOffset(18, 18), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), BackgroundColor3 = C.Accent, BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 2, Parent = thumb})
+    corner(halo, 999)
+    -- globito con el valor mientras arrastras
+    local bubble = mk("Frame", {Size = UDim2.fromOffset(0, 22), AutomaticSize = Enum.AutomaticSize.X, AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 0, -8), BackgroundColor3 = C.Accent, BorderSizePixel = 0, Visible = false, ZIndex = 6, Parent = thumb})
+    corner(bubble, 8)
+    mk("UIPadding", {PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8), Parent = bubble})
+    local bubbleText = mk("TextLabel", {Size = UDim2.new(0, 0, 1, 0), AutomaticSize = Enum.AutomaticSize.X, BackgroundTransparency = 1, Text = "", TextColor3 = C.Bg, Font = Enum.Font.GothamBlack, TextSize = 11, ZIndex = 7, Parent = bubble})
+    mk("Frame", {Size = UDim2.fromOffset(8, 8), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, 0, 1, 0), Rotation = 45, BackgroundColor3 = C.Accent, BorderSizePixel = 0, ZIndex = 6, Parent = bubble})
+    local bubbleScale = mk("UIScale", {Scale = 0.6, Parent = bubble})
+
+    local obj = {Type = "Slider", Id = id}
+    local function paint(animate)
+        local alpha = (maxValue == minValue) and 0 or math.clamp((value - minValue) / (maxValue - minValue), 0, 1)
+        local t = animate and 0.12 or 0
+        tween(fill, t, {Size = UDim2.new(alpha, 0, 1, 0)})
+        tween(thumb, t, {Position = UDim2.new(alpha, 0, 0.5, 0)})
+        local text = Hydra.formatValue(value, step) .. (o.Suffix or "")
+        if not input:IsFocused() then input.Text = text end
+        bubbleText.Text = text
+        local changed = math.abs(value - default) > step / 2
+        tween(reset, 0.2, {BackgroundTransparency = changed and 0.2 or 1, TextTransparency = changed and 0 or 1})
+        reset.Active = changed
+    end
+    function obj:Set(newValue, silent)
+        newValue = tonumber(newValue)
+        if not newValue then paint(true) return end
+        newValue = math.clamp(math.floor((newValue - minValue) / step + 0.5) * step + minValue, minValue, maxValue)
+        local changed = newValue ~= value
+        value = newValue
+        Config.flags[id] = value
+        paint(true)
+        if changed then
+            saveConfig()
+            if o.Callback and not silent then pcall(o.Callback, value) end
+        end
+    end
+    function obj:Get() return value end
+
+    local dragging = false
+    local function setFrom(x)
+        local alpha = math.clamp((x - bar.AbsolutePosition.X) / math.max(bar.AbsoluteSize.X, 1), 0, 1)
+        obj:Set(minValue + (maxValue - minValue) * alpha)
+    end
+    local function grab(on)
+        dragging = on
+        bubble.Visible = true
+        tween(bubbleScale, on and 0.18 or 0.12, {Scale = on and 1 or 0.6}, on and Enum.EasingStyle.Back or Enum.EasingStyle.Quad)
+        tween(halo, 0.18, {Size = on and UDim2.fromOffset(34, 34) or UDim2.fromOffset(18, 18), BackgroundTransparency = on and 0.75 or 1})
+        tween(thumbStroke, 0.18, {Thickness = on and 3.5 or 2.5})
+        if not on then task.delay(0.12, function() if not dragging then bubble.Visible = false end end) end
+    end
+    local hit = mk("TextButton", {Size = UDim2.new(1, -14, 0, 30), Position = UDim2.fromOffset(7, barY - 12), BackgroundTransparency = 1, Text = "", ZIndex = 4, Parent = card})
+    hit.InputBegan:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
+            grab(true)
+            setFrom(inp.Position.X)
+        end
+    end)
+    track(UserInputService.InputChanged:Connect(function(inp)
+        if dragging and (inp.UserInputType == Enum.UserInputType.MouseMovement or inp.UserInputType == Enum.UserInputType.Touch) then setFrom(inp.Position.X) end
+    end))
+    track(UserInputService.InputEnded:Connect(function(inp)
+        if dragging and (inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch) then grab(false) end
+    end))
+    input.Focused:Connect(function()
+        tween(boxStroke, 0.15, {Color = C.Accent, Transparency = 0})
+        input.Text = Hydra.formatValue(value, step)
+    end)
+    input.FocusLost:Connect(function()
+        tween(boxStroke, 0.2, {Color = C.Stroke, Transparency = 0.5})
+        local typed = tonumber((string.gsub(input.Text, ",", ".")))
+        if typed then obj:Set(typed) else paint(false) end
+        input.Text = Hydra.formatValue(value, step) .. (o.Suffix or "")
+    end)
+    reset.MouseButton1Click:Connect(function()
+        if reset.Active then obj:Set(default) end
+    end)
+    paint(false)
+    Hydra.Options[id] = obj
+    return obj
+end
+
+-- ---------- boton flotante de un toggle ----------
+-- Pastilla de vidrio oscuro: el fondo tiene un brillo que gira despacio, el borde una luz que lo recorre
+-- y el nombre un destello que lo cruza (como el titulo). Prendido = todo mas intenso; apagado = tenue.
+Hydra.FloatFx = {}
+track(RunService.Heartbeat:Connect(function(dt)
+    for pill, fx in pairs(Hydra.FloatFx) do
+        if not pill.Parent then
+            Hydra.FloatFx[pill] = nil
+        else
+            fx.angle = (fx.angle + dt * (fx.on and 40 or 18)) % 360
+            fx.border.Rotation = fx.angle
+            fx.bg.Rotation = (360 - fx.angle * 0.5) % 360
+        end
+    end
+end))
+-- deja un boton flotante siempre adentro de la pantalla (x, y = esquina de arriba a la izquierda, en pixeles)
+function Hydra.placeOnScreen(pill, x, y)
+    local screen, size = Gui.AbsoluteSize, pill.AbsoluteSize
+    if screen.X <= 0 or screen.Y <= 0 then return end
+    local margin = 6
+    x = math.clamp(x, margin, math.max(margin, screen.X - size.X - margin))
+    y = math.clamp(y, margin, math.max(margin, screen.Y - size.Y - margin))
+    pill.Position = UDim2.fromOffset(x, y)
+end
+-- si cambia el tamano de la pantalla (o del boton), vuelve a meterlos adentro
+track(Gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+    for _, pill in pairs(Hydra.Floats) do
+        if pill.Parent then Hydra.placeOnScreen(pill, pill.Position.X.Offset, pill.Position.Y.Offset) end
+    end
+end))
+function Hydra.floatButton(obj, o)
+    local id = obj.Id
+    if Hydra.Floats[id] then
+        Hydra.Floats[id]:Destroy()
+        Hydra.Floats[id] = nil
+        Config.floats[id] = nil
+        saveConfig()
+        return false
+    end
+    local saved = Config.floats[id]
+    local pill = mk("TextButton", {Size = UDim2.fromOffset(0, 42), AutomaticSize = Enum.AutomaticSize.X, Position = (type(saved) == "table" and saved.x) and UDim2.fromOffset(saved.x, saved.y) or UDim2.fromOffset(Gui.AbsoluteSize.X / 2 - 70, Gui.AbsoluteSize.Y * 0.18),
+        BackgroundColor3 = Color3.fromRGB(10, 11, 15), BackgroundTransparency = 0.45, AutoButtonColor = false, Text = "", Parent = Gui})
+    corner(pill, 999)
+    -- fondo: una capa con un brillo plateado muy suave que gira lento (va debajo del contenido)
+    local sheen = mk("Frame", {Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(1, 1, 1), BackgroundTransparency = 0, BorderSizePixel = 0, Parent = pill})
+    corner(sheen, 999)
+    local bg = mk("UIGradient", {Transparency = NumberSequence.new(0.93), Parent = sheen})
+    -- borde: una luz que recorre el contorno
+    local border = mk("UIStroke", {Color = Color3.new(1, 1, 1), Thickness = 1.6, Transparency = 0, ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Parent = pill})
+    local borderGradient = mk("UIGradient", {Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(60, 64, 76)), ColorSequenceKeypoint.new(0.45, Color3.fromRGB(255, 255, 255)),
+        ColorSequenceKeypoint.new(0.55, Color3.fromRGB(255, 255, 255)), ColorSequenceKeypoint.new(1, Color3.fromRGB(60, 64, 76)),
+    }), Parent = border})
+    local content = mk("Frame", {Size = UDim2.new(0, 0, 1, 0), AutomaticSize = Enum.AutomaticSize.X, BackgroundTransparency = 1, ZIndex = 2, Parent = pill})
+    mk("UIPadding", {PaddingLeft = UDim.new(0, 14), PaddingRight = UDim.new(0, 18), Parent = content})
+    mk("UIListLayout", {FillDirection = Enum.FillDirection.Horizontal, VerticalAlignment = Enum.VerticalAlignment.Center, Padding = UDim.new(0, 9), SortOrder = Enum.SortOrder.LayoutOrder, Parent = content})
+    -- icono suelto, sin fondo
+    local icon, iconProp = mkIcon(o.Icon or "\226\156\166", C.Dim, {Size = UDim2.fromOffset(18, 18), ScaleType = Enum.ScaleType.Fit, LayoutOrder = 1, Parent = content},
+        {Size = UDim2.fromOffset(18, 18), BackgroundTransparency = 1, Font = Enum.Font.GothamBold, TextSize = 15, LayoutOrder = 1, Parent = content})
+    -- nombre con destello que lo cruza
+    local label = mk("TextLabel", {Size = UDim2.new(0, 0, 0, 18), AutomaticSize = Enum.AutomaticSize.X, BackgroundTransparency = 1, Text = o.Title, TextColor3 = C.Text, Font = Enum.Font.GothamBlack, TextSize = 13, LayoutOrder = 2, Parent = content})
+    local shine = mk("UIGradient", {Transparency = NumberSequence.new({
+        NumberSequenceKeypoint.new(0, 0.45), NumberSequenceKeypoint.new(0.5, 0), NumberSequenceKeypoint.new(1, 0.45),
+    }), Offset = Vector2.new(-1, 0), Parent = label})
+    local shineTween = TweenService:Create(shine, TweenInfo.new(2.2, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, false, 0.9), {Offset = Vector2.new(1, 0)})
+    -- puntito de estado a la derecha
+    local dot = mk("Frame", {Size = UDim2.fromOffset(7, 7), BackgroundColor3 = C.Off, BorderSizePixel = 0, LayoutOrder = 3, Parent = content})
+    corner(dot, 999)
+    local fx = {angle = math.random(0, 359), border = borderGradient, bg = bg, on = false}
+    Hydra.FloatFx[pill] = fx
+    local function paint(animate)
+        local on = obj:Get()
+        fx.on = on
+        local t = animate and 0.45 or 0
+        tween(pill, t, {BackgroundTransparency = on and 0.38 or 0.5})
+        bg.Transparency = NumberSequence.new({
+            NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.5, on and 0.78 or 0.9), NumberSequenceKeypoint.new(1, 1),
+        })
+        tween(border, t, {Thickness = on and 2 or 1.4, Transparency = on and 0 or 0.45})
+        tween(icon, t, {[iconProp] = on and C.Accent or C.Dim})
+        tween(label, t, {TextColor3 = on and C.Text or C.Dim})
+        tween(dot, t, {BackgroundColor3 = on and C.Accent or C.Off, Size = on and UDim2.fromOffset(8, 8) or UDim2.fromOffset(7, 7)})
+        if on then
+            shineTween:Play()
+        else
+            shineTween:Cancel()
+            shine.Offset = Vector2.new(-1, 0)
+        end
+    end
+    obj._floatPaint = function() paint(true) end
+    paint(false)
+    local dragStart, startPos, moved
+    pill.InputBegan:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
+            dragStart, startPos, moved = inp.Position, pill.Position, false
+        end
+    end)
+    track(UserInputService.InputChanged:Connect(function(inp)
+        if dragStart and (inp.UserInputType == Enum.UserInputType.MouseMovement or inp.UserInputType == Enum.UserInputType.Touch) then
+            local delta = inp.Position - dragStart
+            if delta.Magnitude > 6 then moved = true end
+            if moved then Hydra.placeOnScreen(pill, startPos.X.Offset + delta.X, startPos.Y.Offset + delta.Y) end
+        end
+    end))
+    track(UserInputService.InputEnded:Connect(function(inp)
+        if dragStart and (inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch) then
+            dragStart = nil
+            if moved then
+                Config.floats[id] = {x = pill.AbsolutePosition.X, y = pill.AbsolutePosition.Y}
+                saveConfig()
+            else
+                obj:Set(not obj:Get())
             end
         end
-        return list
-    end,
-    Callback = function(id)
-        if UA and UA.IsEnabled() then pcall(UA.SetBoombox, id) end
-    end})
-UnlockToggle:Button({Title = "Look aleatorio", Desc = "Emotes, cosm\195\169ticos y skins al azar",
-    Callback = function()
-        if not (UA and UA.IsEnabled()) then Hydra:Notify(Hydra:T("Activ\195\161 Unlock All primero")) return end
-        local snap = UA.RandomLook()
-        if snap then UA.ApplySnapshot(snap) Hydra:Notify(Hydra:T("Look aplicado")) end
-    end})
-UnlockToggle:Button({Title = "Guardar mi look", Desc = "Lo que ten\195\169s puesto ahora",
-    Callback = function()
-        if not (UA and UA.IsEnabled()) then Hydra:Notify(Hydra:T("Activ\195\161 Unlock All primero")) return end
-        Hydra:Notify(Hydra:T(Unlock.saveLook() and "Look guardado" or "Tu ejecutor no puede guardar archivos"))
-    end})
-UnlockToggle:Button({Title = "Cargar mi look", Desc = "El \195\186ltimo que guardaste",
-    Callback = function()
-        if not (UA and UA.IsEnabled()) then Hydra:Notify(Hydra:T("Activ\195\161 Unlock All primero")) return end
-        Hydra:Notify(Hydra:T(Unlock.loadLook() and "Look aplicado" or "No hay un look guardado"))
-    end})
-UnlockToggle:Toggle({Id = "uaAutoLook", Title = "Cargar mi look al activar", Desc = "Se pone solo cada vez que lo prend\195\169s", Default = true,
-    Callback = function(on) Unlock.AutoLook = on end})
-Unlock.AutoLook = Hydra.Options.uaAutoLook:Get()
--- los tipos guardados se aplican al modulo al iniciar
-if UA then
-    for _, typeName in ipairs({"Cosmetic", "Character", "Unusual", "Perk", "CarryAnimation", "Nametag", "Boombox"}) do
-        pcall(UA.SetType, typeName, Hydra.Options["uaType" .. typeName]:Get())
+    end))
+    Hydra.Floats[id] = pill
+    pill:GetPropertyChangedSignal("AbsoluteSize"):Connect(function() Hydra.placeOnScreen(pill, pill.Position.X.Offset, pill.Position.Y.Offset) end)
+    task.defer(function() if pill.Parent then Hydra.placeOnScreen(pill, pill.Position.X.Offset, pill.Position.Y.Offset) end end)
+    if not (type(saved) == "table" and saved.x) then Config.floats[id] = {} saveConfig() end
+    return true
+end
+
+-- ---------- toggle ----------
+function Hydra.toggle(parent, order, o, nested)
+    local id = o.Id or o.Title
+    local state = Config.flags[id]
+    if type(state) ~= "boolean" then state = o.Default == true end
+    local obj = {Type = "Toggle", Id = id}
+    local card = mk("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = C.Glass, BackgroundTransparency = nested and 0.94 or CARD_ALPHA, BorderSizePixel = 0, ClipsDescendants = true, LayoutOrder = order(), Parent = parent})
+    corner(card, nested and 11 or 14)
+    local cardStroke = stroke(card, C.Stroke, nested and 0.65 or 0.5)
+    mk("UIListLayout", {SortOrder = Enum.SortOrder.LayoutOrder, Parent = card})
+    local headH = nested and 44 or (o.Desc and 60 or 52)
+    local head = mk("TextButton", {Size = UDim2.new(1, 0, 0, headH), BackgroundTransparency = 1, AutoButtonColor = false, Text = "", LayoutOrder = 1, Parent = card})
+    -- barrita de acento a la izquierda (crece al prender)
+    local glowBar = mk("Frame", {Size = UDim2.fromOffset(3, 0), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 0, 0.5, 0), BackgroundColor3 = C.Accent, BorderSizePixel = 0, Parent = head})
+    corner(glowBar, 99)
+    local x = 14
+    local badge, icon, iconProp
+    if not nested then
+        badge = mk("Frame", {Size = UDim2.fromOffset(34, 34), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 12, 0.5, 0), BackgroundColor3 = C.AccentSoft, BorderSizePixel = 0, Parent = head})
+        corner(badge, 10)
+        icon, iconProp = mkIcon(o.Icon or "\226\156\166", C.Accent, {Size = UDim2.fromOffset(18, 18), Position = UDim2.fromOffset(8, 8), ScaleType = Enum.ScaleType.Fit, Parent = badge},
+            {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Font = Enum.Font.GothamBold, TextSize = 15, Parent = badge})
+        x = 56
     end
-    for _, typeName in ipairs({"Perk", "Nametag", "Boombox"}) do
-        pcall(UA.SetInGame, typeName, Hydra.Options["uaInGame" .. typeName]:Get())
+    -- lado derecho: switch, tecla, flotante y flechita (de derecha a izquierda)
+    local right = mk("Frame", {Size = UDim2.new(0, 0, 1, 0), AutomaticSize = Enum.AutomaticSize.X, AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -12, 0, 0), BackgroundTransparency = 1, Parent = head})
+    mk("UIListLayout", {FillDirection = Enum.FillDirection.Horizontal, HorizontalAlignment = Enum.HorizontalAlignment.Right, VerticalAlignment = Enum.VerticalAlignment.Center, Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder, Parent = right})
+    local switch = mk("Frame", {Size = UDim2.fromOffset(44, 24), BackgroundColor3 = C.Off, BorderSizePixel = 0, LayoutOrder = 10, Parent = right})
+    corner(switch, 999)
+    local switchGradient = mk("UIGradient", {Color = ColorSequence.new(Color3.new(1, 1, 1), Color3.fromRGB(200, 200, 200)), Rotation = 90, Parent = switch})
+    local knob = mk("Frame", {Size = UDim2.fromOffset(18, 18), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 3, 0.5, 0), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0, ZIndex = 2, Parent = switch})
+    corner(knob, 999)
+    local knobShadow = mk("UIStroke", {Color = Color3.new(0, 0, 0), Thickness = 1, Transparency = 0.75, Parent = knob})
+    local miniButtons = {}
+    local function mini(orderIndex, width)
+        local b = mk("TextButton", {Size = UDim2.fromOffset(width or 26, 24), BackgroundColor3 = C.Bg, BackgroundTransparency = 0.35, AutoButtonColor = false, Text = "", LayoutOrder = orderIndex, Parent = right})
+        corner(b, 8)
+        local s = stroke(b, C.Stroke, 0.55)
+        b.MouseEnter:Connect(function() tween(s, 0.15, {Color = C.Accent, Transparency = 0.2}) end)
+        b.MouseLeave:Connect(function() tween(s, 0.2, {Color = C.Stroke, Transparency = 0.55}) end)
+        miniButtons[#miniButtons + 1] = b
+        return b, s
+    end
+    -- tecla de atajo (PC)
+    local bindButton
+    if o.Keybind and not nested then
+        local b = mini(5, 0)
+        b.AutomaticSize = Enum.AutomaticSize.X
+        mk("UIPadding", {PaddingLeft = UDim.new(0, 7), PaddingRight = UDim.new(0, 7), Parent = b})
+        b.TextColor3, b.Font, b.TextSize = C.Dim, Enum.Font.GothamBold, 10
+        local saved = Config.binds[id]
+        local code = saved and Enum.KeyCode[saved] or nil
+        Hydra.Binds[id] = {code = code, obj = obj, title = o.Title}
+        if Hydra.refreshKeys then task.defer(Hydra.refreshKeys) end
+        b.Text = keyName(code)
+        bindButton = b
+        b.MouseButton1Click:Connect(function()
+            Hydra.listening = {id = id, button = b}
+            b.Text = "..."
+            b.TextColor3 = C.Accent
+        end)
+    end
+    -- boton para sacarlo flotando (dibujo de una ventanita)
+    local floatButton
+    if o.Floating and not nested then
+        local b = mini(4, 26)
+        local frameIcon = mk("Frame", {Size = UDim2.fromOffset(12, 10), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, -1, 0.5, 1), BackgroundTransparency = 1, Parent = b})
+        corner(frameIcon, 3)
+        local fiStroke = mk("UIStroke", {Color = C.Dim, Thickness = 1.5, Parent = frameIcon})
+        local corner2 = mk("Frame", {Size = UDim2.fromOffset(6, 6), Position = UDim2.new(1, -3, 0, -3), BackgroundColor3 = C.Dim, BorderSizePixel = 0, Parent = frameIcon})
+        corner(corner2, 2)
+        floatButton = {button = b, stroke = fiStroke, dot = corner2}
+        b.MouseButton1Click:Connect(function()
+            local on = Hydra.floatButton(obj, o)
+            tween(fiStroke, 0.2, {Color = on and C.Accent or C.Dim})
+            tween(corner2, 0.2, {BackgroundColor3 = on and C.Accent or C.Dim})
+        end)
+    end
+    -- desplegable de sub-opciones
+    local options, chevron
+    local function ensureOptions()
+        if options then return options end
+        options = mk("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, Visible = false, LayoutOrder = 2, Parent = card})
+        mk("UIPadding", {PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10), PaddingBottom = UDim.new(0, 10), Parent = options})
+        mk("UIListLayout", {Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder, Parent = options})
+        local line = mk("Frame", {Size = UDim2.new(1, 0, 0, 1), BackgroundColor3 = C.Stroke, BackgroundTransparency = 0.5, BorderSizePixel = 0, LayoutOrder = 0, Parent = options})
+        mk("UIGradient", {Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.5, 0), NumberSequenceKeypoint.new(1, 1)}), Parent = line})
+        local b = mini(6, 26)
+        chevron = mk("TextLabel", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "\226\128\186", TextColor3 = C.Dim, Font = Enum.Font.GothamBlack, TextSize = 18, Rotation = 90, Parent = b})
+        b.MouseButton1Click:Connect(function()
+            options.Visible = not options.Visible
+            tween(chevron, 0.25, {Rotation = options.Visible and 270 or 90, TextColor3 = options.Visible and C.Accent or C.Dim})
+        end)
+        return options
+    end
+    -- textos
+    local textArea = mk("Frame", {Size = UDim2.new(1, -x - 12, 1, 0), Position = UDim2.fromOffset(x, 0), BackgroundTransparency = 1, Parent = head})
+    local titleLabel = mk("TextLabel", {Size = UDim2.new(1, 0, 0, 16), Position = UDim2.new(0, 0, 0.5, o.Desc and -15 or -8), BackgroundTransparency = 1, Text = o.Title, TextColor3 = C.Text, Font = Enum.Font.GothamBold, TextSize = nested and 12 or 13, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = textArea})
+    if o.Desc then
+        mk("TextLabel", {Size = UDim2.new(1, 0, 0, 13), Position = UDim2.new(0, 0, 0.5, 3), BackgroundTransparency = 1, Text = o.Desc, TextColor3 = C.Dim, Font = Enum.Font.GothamSemibold, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = textArea})
+    end
+    -- el texto no se mete debajo de los botones de la derecha
+    local function fitText()
+        local scale = (type(WindowScale.Scale) == "number" and WindowScale.Scale > 0.05) and WindowScale.Scale or 1
+        textArea.Size = UDim2.new(1, -x - 18 - right.AbsoluteSize.X / scale, 1, 0)
+    end
+    right:GetPropertyChangedSignal("AbsoluteSize"):Connect(fitText)
+
+    local function paint(animate)
+        local t = animate and 0.25 or 0
+        tween(switch, t, {BackgroundColor3 = state and C.On or C.Off})
+        switchGradient.Enabled = state
+        tween(knob, t, {Position = state and UDim2.new(1, -21, 0.5, 0) or UDim2.new(0, 3, 0.5, 0), BackgroundColor3 = state and C.Bg or Color3.new(1, 1, 1)}, Enum.EasingStyle.Back)
+        if animate then
+            tween(knob, 0.1, {Size = UDim2.fromOffset(23, 16)})
+            task.delay(0.1, function() tween(knob, 0.2, {Size = UDim2.fromOffset(18, 18)}, Enum.EasingStyle.Back) end)
+        end
+        knobShadow.Transparency = state and 0.6 or 0.75
+        tween(cardStroke, t, {Color = state and C.Accent or C.Stroke, Transparency = state and 0.35 or (nested and 0.65 or 0.5)})
+        tween(glowBar, t, {Size = UDim2.fromOffset(3, state and headH - 22 or 0)})
+        tween(titleLabel, t, {TextColor3 = state and C.Text or C.Text})
+        if badge then
+            tween(badge, t, {BackgroundColor3 = state and C.Accent or C.AccentSoft})
+            tween(icon, t, {[iconProp] = state and C.Bg or C.Accent})
+        end
+        if obj._floatPaint then pcall(obj._floatPaint) end
+    end
+    function obj:Set(newState, silent)
+        newState = newState == true
+        if newState == state then return end
+        state = newState
+        Config.flags[id] = state
+        saveConfig()
+        paint(true)
+        if o.Callback and not silent then pcall(o.Callback, state) end
+    end
+    function obj:Get() return state end
+    function obj:Toggle(sub) return Hydra.toggle(ensureOptions(), function() return #options:GetChildren() + 1 end, sub, true) end
+    function obj:Slider(sub) return Hydra.slider(ensureOptions(), function() return #options:GetChildren() + 1 end, sub, true) end
+    function obj:Button(sub) return Hydra.button(ensureOptions(), function() return #options:GetChildren() + 1 end, sub, true) end
+    function obj:Dropdown(sub) return Hydra.dropdown(ensureOptions(), function() return #options:GetChildren() + 1 end, sub, true) end
+    function obj:Open(open)
+        local opts = ensureOptions()
+        opts.Visible = open ~= false
+        chevron.Rotation = opts.Visible and 270 or 90
+    end
+
+    head.MouseButton1Click:Connect(function() obj:Set(not state) end)
+    head.MouseEnter:Connect(function() tween(card, 0.15, {BackgroundTransparency = (nested and 0.94 or CARD_ALPHA) - 0.06}) end)
+    head.MouseLeave:Connect(function() tween(card, 0.2, {BackgroundTransparency = nested and 0.94 or CARD_ALPHA}) end)
+    paint(false)
+    task.defer(fitText)
+    Hydra.Options[id] = obj
+    -- si el valor guardado estaba prendido, se avisa al script al arrancar
+    if state and o.Callback then task.defer(function() pcall(o.Callback, true) end) end
+    if o.Floating and type(Config.floats[id]) == "table" and floatButton then
+        task.defer(function()
+            if Hydra.floatButton(obj, o) then
+                floatButton.stroke.Color = C.Accent
+                floatButton.dot.BackgroundColor3 = C.Accent
+            end
+        end)
+    end
+    return obj
+end
+
+-- ---------- boton ----------
+-- Tab:Button({Title, Desc, Icon, Callback}) o Toggle:Button({...}) dentro del desplegable
+function Hydra.button(parent, order, o, nested)
+    local card = mk("TextButton", {Size = UDim2.new(1, 0, 0, nested and 44 or (o.Desc and 60 or 52)), BackgroundColor3 = C.Glass, BackgroundTransparency = nested and 0.94 or CARD_ALPHA,
+        AutoButtonColor = false, Text = "", LayoutOrder = order(), Parent = parent})
+    corner(card, nested and 11 or 14)
+    local cardStroke = stroke(card, C.Stroke, nested and 0.65 or 0.5)
+    local x = 14
+    if not nested then
+        local badge = mk("Frame", {Size = UDim2.fromOffset(34, 34), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 12, 0.5, 0), BackgroundColor3 = C.AccentSoft, BorderSizePixel = 0, Parent = card})
+        corner(badge, 10)
+        mkIcon(o.Icon or "\226\158\164", C.Accent, {Size = UDim2.fromOffset(18, 18), Position = UDim2.fromOffset(8, 8), ScaleType = Enum.ScaleType.Fit, Parent = badge},
+            {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Font = Enum.Font.GothamBold, TextSize = 15, Parent = badge})
+        x = 56
+    end
+    mk("TextLabel", {Size = UDim2.new(1, -x - 60, 0, 16), Position = UDim2.new(0, x, 0.5, o.Desc and -15 or -8), BackgroundTransparency = 1, Text = o.Title, TextColor3 = C.Text,
+        Font = Enum.Font.GothamBold, TextSize = nested and 12 or 13, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = card})
+    if o.Desc then
+        mk("TextLabel", {Size = UDim2.new(1, -x - 60, 0, 13), Position = UDim2.new(0, x, 0.5, 3), BackgroundTransparency = 1, Text = o.Desc, TextColor3 = C.Dim,
+            Font = Enum.Font.GothamSemibold, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = card})
+    end
+    -- flechita a la derecha que se ilumina al tocar
+    local go = mk("Frame", {Size = UDim2.fromOffset(30, 26), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -12, 0.5, 0), BackgroundColor3 = C.Bg, BackgroundTransparency = 0.35, BorderSizePixel = 0, Parent = card})
+    corner(go, 9)
+    local goStroke = stroke(go, C.Stroke, 0.55)
+    local arrow = mk("TextLabel", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "\226\128\186", TextColor3 = C.Dim, Font = Enum.Font.GothamBlack, TextSize = 18, Parent = go})
+    local scale = mk("UIScale", {Scale = 1, Parent = card})
+    card.MouseEnter:Connect(function() tween(card, 0.15, {BackgroundTransparency = (nested and 0.94 or CARD_ALPHA) - 0.06}) end)
+    card.MouseLeave:Connect(function()
+        tween(card, 0.2, {BackgroundTransparency = nested and 0.94 or CARD_ALPHA})
+        tween(scale, 0.25, {Scale = 1})
+    end)
+    card.MouseButton1Down:Connect(function() tween(scale, 0.08, {Scale = 0.98}) end)
+    card.MouseButton1Up:Connect(function() tween(scale, 0.25, {Scale = 1}, Enum.EasingStyle.Back) end)
+    card.MouseButton1Click:Connect(function()
+        tween(goStroke, 0.1, {Color = C.Accent, Transparency = 0})
+        tween(arrow, 0.1, {TextColor3 = C.Accent})
+        tween(cardStroke, 0.1, {Color = C.Accent, Transparency = 0.35})
+        task.delay(0.35, function()
+            tween(goStroke, 0.4, {Color = C.Stroke, Transparency = 0.55})
+            tween(arrow, 0.4, {TextColor3 = C.Dim})
+            tween(cardStroke, 0.4, {Color = C.Stroke, Transparency = nested and 0.65 or 0.5})
+        end)
+        if o.Callback then
+            local ok, err = pcall(o.Callback)
+            if not ok then toast("Error: " .. tostring(err), C.Bad) end
+        end
+    end)
+    return {Holder = card}
+end
+
+-- ---------- lista desplegable ----------
+-- Tab:Dropdown({Id, Title, Desc, Options = {{value = ..., text = "..."}, ...} o function() return {...} end,
+--   Default = valor, Callback = function(valor) end}) o Toggle:Dropdown({...}). Guarda la eleccion (Config.flags).
+function Hydra.dropdown(parent, order, o, nested)
+    local id = o.Id or o.Title
+    local obj = {Type = "Dropdown", Id = id, value = nil, text = nil}
+    local card = mk("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = C.Glass, BackgroundTransparency = nested and 0.94 or CARD_ALPHA,
+        BorderSizePixel = 0, ClipsDescendants = true, LayoutOrder = order(), Parent = parent})
+    corner(card, nested and 11 or 14)
+    local cardStroke = stroke(card, C.Stroke, nested and 0.65 or 0.5)
+    mk("UIListLayout", {SortOrder = Enum.SortOrder.LayoutOrder, Parent = card})
+    local headH = nested and 46 or (o.Desc and 60 or 52)
+    local head = mk("Frame", {Size = UDim2.new(1, 0, 0, headH), BackgroundTransparency = 1, LayoutOrder = 1, Parent = card})
+    mk("TextLabel", {Size = UDim2.new(1, -190, 0, 16), Position = UDim2.new(0, 14, 0.5, o.Desc and -15 or -8), BackgroundTransparency = 1, Text = o.Title, TextColor3 = C.Text,
+        Font = Enum.Font.GothamBold, TextSize = nested and 12 or 13, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = head})
+    if o.Desc then
+        mk("TextLabel", {Size = UDim2.new(1, -190, 0, 13), Position = UDim2.new(0, 14, 0.5, 3), BackgroundTransparency = 1, Text = o.Desc, TextColor3 = C.Dim,
+            Font = Enum.Font.GothamSemibold, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = head})
+    end
+    local pill = mk("TextButton", {Size = UDim2.fromOffset(160, 30), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -12, 0.5, 0), BackgroundColor3 = C.Bg, BackgroundTransparency = 0.3,
+        AutoButtonColor = false, Text = "", Parent = head})
+    corner(pill, 10)
+    local pillStroke = stroke(pill, C.Stroke, 0.5)
+    local pillText = mk("TextLabel", {Size = UDim2.new(1, -34, 1, 0), Position = UDim2.fromOffset(10, 0), BackgroundTransparency = 1, Text = "\226\128\148", TextColor3 = C.Text,
+        Font = Enum.Font.GothamBold, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = pill})
+    local chevron = mk("TextLabel", {Size = UDim2.fromOffset(24, 30), AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -4, 0, 0), BackgroundTransparency = 1, Text = "\226\128\186",
+        TextColor3 = C.Dim, Font = Enum.Font.GothamBlack, TextSize = 18, Rotation = 90, Parent = pill})
+    -- lista (con scroll si son muchas)
+    local listWrap = mk("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, Visible = false, LayoutOrder = 2, Parent = card})
+    mk("UIPadding", {PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10), PaddingBottom = UDim.new(0, 10), Parent = listWrap})
+    local list = mk("ScrollingFrame", {Size = UDim2.new(1, 0, 0, 0), BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3, ScrollBarImageColor3 = C.Accent,
+        CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y, Parent = listWrap})
+    local listLayout = mk("UIListLayout", {Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder, Parent = list})
+    local function options()
+        local raw = type(o.Options) == "function" and o.Options() or o.Options or {}
+        return type(raw) == "table" and raw or {}
+    end
+    local function textFor(value)
+        for _, option in ipairs(options()) do
+            if option.value == value then return option.text end
+        end
+        return nil
+    end
+    function obj:Set(value, silent)
+        obj.value = value
+        obj.text = textFor(value) or (value ~= nil and tostring(value)) or nil
+        pillText.Text = obj.text or "\226\128\148"
+        Config.flags[id] = value
+        saveConfig()
+        if o.Callback and not silent then pcall(o.Callback, value) end
+    end
+    function obj:Get() return obj.value end
+    local function close()
+        listWrap.Visible = false
+        tween(chevron, 0.25, {Rotation = 90, TextColor3 = C.Dim})
+        tween(pillStroke, 0.2, {Color = C.Stroke, Transparency = 0.5})
+        tween(cardStroke, 0.2, {Color = C.Stroke, Transparency = nested and 0.65 or 0.5})
+    end
+    local function open()
+        for _, child in ipairs(list:GetChildren()) do
+            if child:IsA("GuiObject") then child:Destroy() end
+        end
+        local all = options()
+        if #all == 0 then
+            mk("TextLabel", {Size = UDim2.new(1, 0, 0, 28), BackgroundTransparency = 1, Text = "No hay nada para elegir", TextColor3 = C.Dim, Font = Enum.Font.GothamSemibold, TextSize = 11, Parent = list})
+        end
+        for index, option in ipairs(all) do
+            local selected = option.value == obj.value
+            local item = mk("TextButton", {Size = UDim2.new(1, -6, 0, 32), BackgroundColor3 = selected and C.Accent or C.Glass, BackgroundTransparency = selected and 0.82 or 0.94,
+                AutoButtonColor = false, Text = "", LayoutOrder = index, Parent = list})
+            corner(item, 9)
+            if selected then stroke(item, C.Accent, 0.4) end
+            mk("TextLabel", {Size = UDim2.new(1, -20, 1, 0), Position = UDim2.fromOffset(12, 0), BackgroundTransparency = 1, Text = option.text or tostring(option.value),
+                TextColor3 = selected and C.Accent or C.Text, Font = Enum.Font.GothamBold, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = item})
+            item.MouseEnter:Connect(function() if option.value ~= obj.value then tween(item, 0.12, {BackgroundTransparency = 0.88}) end end)
+            item.MouseLeave:Connect(function() if option.value ~= obj.value then tween(item, 0.15, {BackgroundTransparency = 0.94}) end end)
+            item.MouseButton1Click:Connect(function()
+                obj:Set(option.value)
+                close()
+            end)
+        end
+        local height = math.min(#all, 6) * 36
+        list.Size = UDim2.new(1, 0, 0, math.max(height, 28))
+        listWrap.Visible = true
+        tween(chevron, 0.25, {Rotation = 270, TextColor3 = C.Accent})
+        tween(pillStroke, 0.2, {Color = C.Accent, Transparency = 0.2})
+        tween(cardStroke, 0.2, {Color = C.Accent, Transparency = 0.45})
+    end
+    pill.MouseButton1Click:Connect(function()
+        if listWrap.Visible then close() else open() end
+    end)
+    local saved = Config.flags[id]
+    if saved ~= nil then obj:Set(saved, true) elseif o.Default ~= nil then obj:Set(o.Default, true) end
+    if obj.value ~= nil and o.Callback then task.defer(function() pcall(o.Callback, obj.value) end) end
+    -- para refrescar el texto si las opciones cargan despues
+    function obj:Refresh() obj.text = textFor(obj.value) or obj.text pillText.Text = obj.text or "\226\128\148" end
+    Hydra.Options[id] = obj
+    return obj
+end
+
+-- teclas: asignar y usar
+track(UserInputService.InputBegan:Connect(function(input, processed)
+    if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+    local listening = Hydra.listening
+    if listening then
+        Hydra.listening = nil
+        local code = input.KeyCode
+        if code == Enum.KeyCode.Backspace or code == Enum.KeyCode.Escape then code = nil end
+        Hydra.Binds[listening.id].code = code
+        Config.binds[listening.id] = code and code.Name or nil
+        saveConfig()
+        listening.button.Text = keyName(code)
+        listening.button.TextColor3 = code and C.Text or C.Dim
+        if Hydra.refreshKeys then Hydra.refreshKeys() end
+        return
+    end
+    if processed then return end
+    for _, bind in pairs(Hydra.Binds) do
+        if bind.code and input.KeyCode == bind.code then bind.obj:Set(not bind.obj:Get()) end
+    end
+end))
+
+
+-- ---------- buscador de jugadores (con vista previa del avatar) ----------
+-- Tab:PlayerSearch({Placeholder, ButtonText, Callback = function(info) return ok, mensaje end})
+--   info = {id = UserId, user = "@usuario", display = "nombre visible"}
+-- Arriba: caja para escribir el nombre y el boton. Al escribir, despues de una pausa corta, busca el usuario y muestra
+-- su avatar de cuerpo entero (miniatura oficial rbxthumb), su nombre y su @usuario. Abajo: los jugadores del servidor
+-- (toca uno y se completa el nombre). El Callback corre aparte (puede esperar); lo que devuelve se muestra en el chip.
+-- Devuelve: obj:Fill(nombre), obj:SetStatus(texto, "ok" | "bad" | "busy"), obj:Get() (el ultimo usuario encontrado).
+EN["Nombre de usuario"] = "Username"
+EN["Aplicar"] = "Apply"
+EN["Buscando\226\128\166"] = "Searching\226\128\166"
+EN["No existe ese usuario"] = "That user doesn't exist"
+EN["\226\156\147 Listo para aplicar"] = "\226\156\147 Ready to apply"
+EN["\226\156\149 Revis\195\161 el nombre"] = "\226\156\149 Check the name"
+EN["Escrib\195\173 un nombre primero"] = "Type a name first"
+EN["Aplicando\226\128\166"] = "Applying\226\128\166"
+EN["En el servidor"] = "In this server"
+EN["No hay nadie m\195\161s en el servidor"] = "There is nobody else in the server"
+function Hydra.playerSearch(parent, order, o)
+    local UserService = game:GetService("UserService")
+    local S = {gen = 0, cache = {}, info = nil, busy = false}
+    local obj = {Type = "PlayerSearch"}
+    local card = mk("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = C.Glass, BackgroundTransparency = CARD_ALPHA,
+        BorderSizePixel = 0, ClipsDescendants = true, LayoutOrder = order(), Parent = parent})
+    corner(card, 14)
+    local cardStroke = stroke(card, C.Stroke, 0.5)
+    mk("UIPadding", {PaddingTop = UDim.new(0, 10), PaddingBottom = UDim.new(0, 10), PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10), Parent = card})
+    mk("UIListLayout", {Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder, Parent = card})
+
+    -- 1) barra de busqueda: lupa dibujada + caja + boton
+    local bar = mk("Frame", {Size = UDim2.new(1, 0, 0, 40), BackgroundColor3 = C.Bg, BackgroundTransparency = 0.3, BorderSizePixel = 0, LayoutOrder = 1, Parent = card})
+    corner(bar, 12)
+    local barStroke = stroke(bar, C.Stroke, 0.55)
+    local lens = mk("Frame", {Size = UDim2.fromOffset(12, 12), Position = UDim2.fromOffset(12, 11), BackgroundTransparency = 1, Parent = bar})
+    corner(lens, 99)
+    local lensStroke = mk("UIStroke", {Color = C.Dim, Thickness = 2, Parent = lens})
+    local handle = mk("Frame", {Size = UDim2.fromOffset(6, 2), Position = UDim2.fromOffset(22, 25), Rotation = 45, BackgroundColor3 = C.Dim, BorderSizePixel = 0, Parent = bar})
+    corner(handle, 99)
+    local box = mk("TextBox", {Size = UDim2.new(1, -140, 1, 0), Position = UDim2.fromOffset(36, 0), BackgroundTransparency = 1, Text = "", PlaceholderText = tr(o.Placeholder or "Nombre de usuario"),
+        PlaceholderColor3 = C.Dim, TextColor3 = C.Text, Font = Enum.Font.GothamBold, TextSize = 13, ClearTextOnFocus = false, TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd, Parent = bar})
+    local apply = mk("TextButton", {Size = UDim2.fromOffset(92, 30), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -5, 0.5, 0), BackgroundColor3 = C.Accent,
+        AutoButtonColor = false, Text = "", Parent = bar})
+    corner(apply, 10)
+    mk("UIGradient", {Rotation = 90, Color = ColorSequence.new(Color3.new(1, 1, 1), Color3.fromRGB(178, 183, 195)), Parent = apply})
+    local applyLabel = mk("TextLabel", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = o.ButtonText or "Aplicar", TextColor3 = C.Bg, Font = Enum.Font.GothamBlack, TextSize = 12, Parent = apply})
+    local applyScale = mk("UIScale", {Scale = 1, Parent = apply})
+    box.Focused:Connect(function()
+        tween(barStroke, 0.2, {Color = C.Accent, Transparency = 0.15})
+        tween(lensStroke, 0.2, {Color = C.Accent})
+        tween(handle, 0.2, {BackgroundColor3 = C.Accent})
+    end)
+    box.FocusLost:Connect(function()
+        tween(barStroke, 0.25, {Color = C.Stroke, Transparency = 0.55})
+        tween(lensStroke, 0.25, {Color = C.Dim})
+        tween(handle, 0.25, {BackgroundColor3 = C.Dim})
+    end)
+
+    -- 2) vista previa: un "escenario" con el avatar centrado sobre una base de luz, el nombre debajo
+    -- y una barra de estado fina abajo de todo (se abre al encontrar a alguien)
+    local OPEN = 214
+    local preview = mk("Frame", {Size = UDim2.new(1, 0, 0, 0), BackgroundColor3 = C.Bg, BackgroundTransparency = 0.4, BorderSizePixel = 0, ClipsDescendants = true,
+        Visible = false, LayoutOrder = 2, Parent = card})
+    corner(preview, 12)
+    stroke(preview, C.Stroke, 0.6)
+    -- luz desde arriba (degradado vertical)
+    local stage = mk("Frame", {Size = UDim2.new(1, 0, 0, 150), BackgroundColor3 = Color3.new(1, 1, 1), BackgroundTransparency = 0, BorderSizePixel = 0, Parent = preview})
+    mk("UIGradient", {Rotation = 90, Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 0.86), NumberSequenceKeypoint.new(0.7, 0.97), NumberSequenceKeypoint.new(1, 1)}), Parent = stage})
+    -- base de luz debajo de los pies (dos ovalos)
+    local glow = mk("Frame", {Size = UDim2.fromOffset(150, 20), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, 0, 0, 136), BackgroundColor3 = C.Accent,
+        BackgroundTransparency = 0.82, BorderSizePixel = 0, Parent = preview})
+    corner(glow, 999)
+    local base = mk("Frame", {Size = UDim2.fromOffset(96, 10), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, 0, 0, 136), BackgroundColor3 = C.Accent,
+        BackgroundTransparency = 0.45, BorderSizePixel = 0, Parent = preview})
+    corner(base, 999)
+    mk("UIGradient", {Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.5, 0), NumberSequenceKeypoint.new(1, 1)}), Parent = base})
+    -- el avatar
+    local body = mk("ImageLabel", {Size = UDim2.fromOffset(136, 136), AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 2), BackgroundTransparency = 1, Image = "",
+        ImageTransparency = 1, ScaleType = Enum.ScaleType.Fit, ZIndex = 2, Parent = preview})
+    -- linea que escanea de arriba a abajo mientras busca
+    local scan = mk("Frame", {Size = UDim2.fromOffset(150, 2), AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 8), BackgroundColor3 = C.Accent, BorderSizePixel = 0,
+        Visible = false, ZIndex = 3, Parent = preview})
+    mk("UIGradient", {Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.5, 0), NumberSequenceKeypoint.new(1, 1)}), Parent = scan})
+    TweenService:Create(scan, TweenInfo.new(0.9, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true), {Position = UDim2.new(0.5, 0, 0, 132)}):Play()
+    -- textos centrados
+    local displayLabel = mk("TextLabel", {Size = UDim2.new(1, -24, 0, 20), Position = UDim2.fromOffset(12, 150), BackgroundTransparency = 1, Text = "", TextColor3 = C.Text,
+        Font = Enum.Font.GothamBlack, TextSize = 16, TextTruncate = Enum.TextTruncate.AtEnd, Parent = preview})
+    local userLabel = mk("TextLabel", {Size = UDim2.new(1, -24, 0, 14), Position = UDim2.fromOffset(12, 171), BackgroundTransparency = 1, Text = "", TextColor3 = C.Dim,
+        Font = Enum.Font.GothamSemibold, TextSize = 11, TextTruncate = Enum.TextTruncate.AtEnd, Parent = preview})
+    -- estado: texto chico + barra fina
+    local statusLabel = mk("TextLabel", {Size = UDim2.new(1, -28, 0, 12), Position = UDim2.fromOffset(14, 189), BackgroundTransparency = 1, Text = "", TextColor3 = C.Dim,
+        Font = Enum.Font.GothamBold, TextSize = 10, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = preview})
+    local track_ = mk("Frame", {Size = UDim2.new(1, -28, 0, 3), Position = UDim2.fromOffset(14, 204), BackgroundColor3 = C.Field, BorderSizePixel = 0, ClipsDescendants = true, Parent = preview})
+    corner(track_, 99)
+    local fill = mk("Frame", {Size = UDim2.fromScale(0, 1), BackgroundColor3 = C.Accent, BorderSizePixel = 0, Parent = track_})
+    corner(fill, 99)
+    local fillLoop = nil
+    -- la vieja variable "chip" la usa el resto: ahora es el texto de estado
+    local chip = statusLabel
+
+    local function show(open)
+        if open then
+            if not preview.Visible then
+                preview.Size = UDim2.new(1, 0, 0, 0)
+                preview.Visible = true
+            end
+            tween(preview, 0.3, {Size = UDim2.new(1, 0, 0, OPEN)})
+        elseif preview.Visible then
+            local t = tween(preview, 0.2, {Size = UDim2.new(1, 0, 0, 0)}, Enum.EasingStyle.Quad)
+            t.Completed:Connect(function(state)
+                if state == Enum.PlaybackState.Completed and preview.Size.Y.Offset == 0 then preview.Visible = false end
+            end)
+        end
+    end
+    local KIND = {ok = C.Good, bad = C.Bad, busy = C.Accent}
+    local function setChip(textValue, kind)
+        local color = KIND[kind] or C.Accent
+        chip.Text = tr(textValue)
+        chip.TextColor3 = (kind == "ok" or kind == "bad") and color or C.Dim
+        if fillLoop then fillLoop:Cancel() fillLoop = nil end
+        fill.BackgroundColor3 = color
+        if kind == "busy" then
+            -- barra que corre de un lado al otro (esperando)
+            fill.Size = UDim2.fromScale(0.3, 1)
+            fill.Position = UDim2.fromScale(-0.3, 0)
+            fillLoop = TweenService:Create(fill, TweenInfo.new(0.9, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1), {Position = UDim2.fromScale(1, 0)})
+            fillLoop:Play()
+        else
+            fill.Position = UDim2.fromScale(0, 0)
+            fill.Size = UDim2.fromScale(0, 1)
+            tween(fill, 0.45, {Size = UDim2.fromScale(1, 1)})
+        end
+        tween(base, 0.3, {BackgroundColor3 = color})
+        tween(glow, 0.3, {BackgroundColor3 = color})
+        tween(cardStroke, 0.25, {Color = (kind == "ok" or kind == "bad") and color or C.Stroke, Transparency = (kind == "ok" or kind == "bad") and 0.35 or 0.5})
+    end
+    local function setLoading(name)
+        scan.Visible = true
+        tween(body, 0.2, {ImageTransparency = 0.75})
+        displayLabel.TextColor3 = C.Text
+        displayLabel.Text = name
+        userLabel.Text = tr("Buscando\226\128\166")
+        setChip("Buscando\226\128\166", "busy")
+        show(true)
+    end
+    local function setFound(info)
+        scan.Visible = false
+        body.Image = "rbxthumb://type=Avatar&id=" .. tostring(info.id) .. "&w=420&h=420"
+        -- entra subiendo desde la base
+        body.ImageTransparency = 1
+        body.Position = UDim2.new(0.5, 0, 0, 14)
+        tween(body, 0.45, {ImageTransparency = 0, Position = UDim2.new(0.5, 0, 0, 2)})
+        displayLabel.TextColor3 = C.Text
+        displayLabel.Text = info.display or info.user
+        userLabel.Text = "@" .. info.user .. "  \194\183  ID " .. tostring(info.id)
+        setChip("\226\156\147 Listo para aplicar")
+        show(true)
+    end
+    local function setMissing(name)
+        scan.Visible = false
+        tween(body, 0.2, {ImageTransparency = 1})
+        displayLabel.Text = name
+        displayLabel.TextColor3 = C.Bad
+        userLabel.Text = tr("No existe ese usuario")
+        setChip("\226\156\149 Revis\195\161 el nombre", "bad")
+        show(true)
+    end
+    -- busca el usuario (con cache: cada nombre se pide una sola vez)
+    local function lookup(name)
+        local key = string.lower(name)
+        local cached = S.cache[key]
+        if cached == nil then
+            local okId, id = pcall(function() return Players:GetUserIdFromNameAsync(name) end)
+            if not okId or not id then
+                cached = false
+            else
+                local info = {id = id, user = name, display = nil}
+                pcall(function()
+                    local list = UserService:GetUserInfosByUserIdsAsync({id})
+                    local u = list and list[1]
+                    if u then info.user, info.display = u.Username or name, u.DisplayName end
+                end)
+                cached = info
+            end
+            S.cache[key] = cached
+        end
+        return cached
+    end
+    local function cleanName() return (tostring(box.Text or ""):match("^%s*(.-)%s*$")) end
+    local function validName(name) return #name >= 3 and #name <= 20 and not name:find("[^%w_]") end
+    box:GetPropertyChangedSignal("Text"):Connect(function()
+        S.gen = S.gen + 1
+        local gen = S.gen
+        local name = cleanName()
+        S.info = nil
+        -- los nombres de Roblox tienen de 3 a 20 caracteres: letras, numeros y _
+        if not validName(name) then show(false) return end
+        task.delay(0.55, function()
+            if gen ~= S.gen then return end
+            setLoading(name)
+            local info = lookup(name)
+            if gen ~= S.gen then return end -- ya escribio otra cosa
+            S.info = info or nil
+            if info then setFound(info) else setMissing(name) end
+        end)
+    end)
+
+    function obj:SetStatus(textValue, kind) setChip(textValue, kind) show(true) end
+    function obj:Fill(name) box.Text = tostring(name or "") end
+    function obj:Get() return S.info end
+    local function run()
+        if S.busy then return end
+        local name = cleanName()
+        if not validName(name) then toast(tr("Escrib\195\173 un nombre primero"), C.Bad) return end
+        S.busy = true
+        tween(applyScale, 0.08, {Scale = 0.94})
+        task.delay(0.1, function() tween(applyScale, 0.25, {Scale = 1}, Enum.EasingStyle.Back) end)
+        applyLabel.Text = tr("Aplicando\226\128\166")
+        task.spawn(function()
+            local info = S.info
+            if not info then
+                setLoading(name)
+                info = lookup(name)
+                if info then setFound(info) S.info = info else setMissing(name) end
+            end
+            if info and o.Callback then
+                setChip("Aplicando\226\128\166", "busy")
+                local okRun, ok, message = pcall(o.Callback, info)
+                if not okRun then ok, message = false, tostring(ok) end
+                if message then setChip(message, ok and "ok" or "bad") end
+            end
+            applyLabel.Text = tr(o.ButtonText or "Aplicar")
+            S.busy = false
+        end)
+    end
+    apply.MouseButton1Click:Connect(run)
+    box.FocusLost:Connect(function(enter) if enter then run() end end)
+
+    -- 3) jugadores del servidor: toca uno y se completa el nombre
+    local serverHead = mk("TextLabel", {Size = UDim2.new(1, 0, 0, 14), BackgroundTransparency = 1, Text = "En el servidor", TextColor3 = C.Dim, Font = Enum.Font.GothamBlack,
+        TextSize = 10, TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = 3, Parent = card})
+    local strip = mk("ScrollingFrame", {Size = UDim2.new(1, 0, 0, 66), BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 2, ScrollBarImageColor3 = C.Accent,
+        ScrollingDirection = Enum.ScrollingDirection.X, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.X, LayoutOrder = 4, Parent = card})
+    mk("UIListLayout", {FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder, Parent = strip})
+    local empty = mk("TextLabel", {Size = UDim2.new(1, 0, 0, 40), BackgroundTransparency = 1, Text = "No hay nadie m\195\161s en el servidor", TextColor3 = C.Dim,
+        Font = Enum.Font.GothamSemibold, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left, Visible = false, LayoutOrder = 0, Parent = strip})
+    local bubbles = {}
+    local function addPlayer(player)
+        if player == LocalPlayer or bubbles[player] then return end
+        local b = mk("TextButton", {Size = UDim2.fromOffset(54, 62), BackgroundTransparency = 1, AutoButtonColor = false, Text = "", LayoutOrder = #strip:GetChildren(), Parent = strip})
+        local face = mk("ImageLabel", {Size = UDim2.fromOffset(42, 42), Position = UDim2.fromOffset(6, 2), BackgroundColor3 = C.Field, BorderSizePixel = 0,
+            Image = "rbxthumb://type=AvatarHeadShot&id=" .. tostring(player.UserId) .. "&w=150&h=150", Parent = b})
+        corner(face, 99)
+        local faceStroke = stroke(face, C.Stroke, 0.5)
+        mk("TextLabel", {Size = UDim2.new(1, 0, 0, 14), Position = UDim2.fromOffset(0, 47), BackgroundTransparency = 1, Text = player.DisplayName, TextColor3 = C.Text,
+            Font = Enum.Font.GothamBold, TextSize = 10, TextTruncate = Enum.TextTruncate.AtEnd, Parent = b})
+        local faceScale = mk("UIScale", {Scale = 1, Parent = face})
+        b.MouseEnter:Connect(function() tween(faceStroke, 0.15, {Color = C.Accent, Transparency = 0.1}) end)
+        b.MouseLeave:Connect(function() tween(faceStroke, 0.2, {Color = C.Stroke, Transparency = 0.5}) end)
+        b.MouseButton1Click:Connect(function()
+            tween(faceScale, 0.08, {Scale = 0.9})
+            task.delay(0.1, function() tween(faceScale, 0.3, {Scale = 1}, Enum.EasingStyle.Back) end)
+            -- ya se sabe quien es: se guarda en la cache para no buscarlo
+            S.cache[string.lower(player.Name)] = {id = player.UserId, user = player.Name, display = player.DisplayName}
+            box.Text = player.Name
+        end)
+        bubbles[player] = b
+        empty.Visible = false
+    end
+    local function removePlayer(player)
+        if bubbles[player] then bubbles[player]:Destroy() bubbles[player] = nil end
+        empty.Visible = next(bubbles) == nil
+    end
+    for _, player in ipairs(Players:GetPlayers()) do addPlayer(player) end
+    empty.Visible = next(bubbles) == nil
+    track(Players.PlayerAdded:Connect(addPlayer))
+    track(Players.PlayerRemoving:Connect(removePlayer))
+    -- al cambiar el idioma: el texto de ayuda de la caja
+    local previous = Lang.onChange
+    Lang.onChange = function()
+        if previous then previous() end
+        box.PlaceholderText = tr(o.Placeholder or "Nombre de usuario")
+        if not S.busy then applyLabel.Text = tr(o.ButtonText or "Aplicar") end
+    end
+    obj.Holder = card
+    obj.header = serverHead
+    return obj
+end
+
+-- ---------- Ajustes: teclado con las teclas asignadas ----------
+-- Dibuja un teclado y marca las teclas que tienen una opcion (las de los chips de tecla de cada toggle).
+-- Las teclas tienen relieve y se hunden cuando las apretas; las asignadas quedan plateadas con un brillo que pasa.
+-- Debajo, la lista "tecla -> opcion" (traducida). Se actualiza cuando asignas o borras una tecla y al cambiar el idioma.
+EN["Teclado"] = "Keyboard"
+EN["en uso"] = "in use"
+EN["Abrir / cerrar Hydra"] = "Open / close Hydra"
+EN["Toc\195\161 el chip de tecla de cualquier opci\195\179n para asignarle una"] = "Tap the key chip of any option to give it a key"
+Hydra.Keyboard = {keys = {}, ROWS = {
+    {{"`", "Backquote"}, {"1", "One"}, {"2", "Two"}, {"3", "Three"}, {"4", "Four"}, {"5", "Five"}, {"6", "Six"}, {"7", "Seven"}, {"8", "Eight"}, {"9", "Nine"}, {"0", "Zero"}, {"-", "Minus"}, {"=", "Equals"}, {"Back", "Backspace", 2}},
+    {{"Tab", "Tab", 1.5}, {"Q", "Q"}, {"W", "W"}, {"E", "E"}, {"R", "R"}, {"T", "T"}, {"Y", "Y"}, {"U", "U"}, {"I", "I"}, {"O", "O"}, {"P", "P"}, {"[", "LeftBracket"}, {"]", "RightBracket"}, {"\\", "BackSlash", 1.5}},
+    {{"Caps", "CapsLock", 1.75}, {"A", "A"}, {"S", "S"}, {"D", "D"}, {"F", "F"}, {"G", "G"}, {"H", "H"}, {"J", "J"}, {"K", "K"}, {"L", "L"}, {";", "Semicolon"}, {"'", "Quote"}, {"Enter", "Return", 2.25}},
+    {{"Shift", "LeftShift", 2.25}, {"Z", "Z"}, {"X", "X"}, {"C", "C"}, {"V", "V"}, {"B", "B"}, {"N", "N"}, {"M", "M"}, {",", "Comma"}, {".", "Period"}, {"/", "Slash"}, {"Shift", "RightShift", 2.75}},
+    {{"Ctrl", "LeftControl", 1.5}, {"Alt", "LeftAlt", 1.5}, {"", "Space", 9}, {"Alt", "RightAlt", 1.5}, {"Ctrl", "RightControl", 1.5}},
+}}
+-- brillo que cruza la tecla (lo mueve TweenService en bucle, sin codigo corriendo cada frame)
+Hydra.Keyboard.SHEEN = TweenInfo.new(2.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, false, 0.8)
+Hydra.Keyboard.TOP_LIGHT = ColorSequence.new(Color3.new(1, 1, 1), Color3.fromRGB(178, 183, 195))
+do
+    local KB = Hydra.Keyboard
+    section(TabSettings, "Teclas", "\226\150\162")
+    local card = mk("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = C.Glass, BackgroundTransparency = CARD_ALPHA,
+        BorderSizePixel = 0, LayoutOrder = nextOrder(TabSettings), Parent = TabSettings.page})
+    corner(card, 14)
+    stroke(card, C.Stroke, 0.5)
+    mk("UIPadding", {PaddingTop = UDim.new(0, 10), PaddingBottom = UDim.new(0, 10), PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10), Parent = card})
+    mk("UIListLayout", {Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder, Parent = card})
+    -- cabecera: titulo y contador de teclas en uso
+    local head = mk("Frame", {Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1, LayoutOrder = 0, Parent = card})
+    mk("TextLabel", {Size = UDim2.new(1, -90, 1, 0), BackgroundTransparency = 1, Text = "Teclado", TextColor3 = C.Text, Font = Enum.Font.GothamBlack, TextSize = 13,
+        TextXAlignment = Enum.TextXAlignment.Left, Parent = head})
+    KB.counter = mk("TextLabel", {Size = UDim2.fromOffset(0, 20), AutomaticSize = Enum.AutomaticSize.X, AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 0, 0, 0),
+        BackgroundColor3 = C.Accent, BackgroundTransparency = 0.82, Text = "0", TextColor3 = C.Text, Font = Enum.Font.GothamBold, TextSize = 10, Parent = head})
+    corner(KB.counter, 10)
+    stroke(KB.counter, C.Accent, 0.55)
+    mk("UIPadding", {PaddingLeft = UDim.new(0, 9), PaddingRight = UDim.new(0, 9), Parent = KB.counter})
+    -- el teclado: base oscura con degradado y las teclas con relieve
+    local board = mk("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = C.Bg, BackgroundTransparency = 0.25,
+        BorderSizePixel = 0, LayoutOrder = 1, Parent = card})
+    corner(board, 12)
+    stroke(board, C.Stroke, 0.6)
+    mk("UIGradient", {Rotation = 90, Color = ColorSequence.new(Color3.fromRGB(70, 76, 90), Color3.new(1, 1, 1)), Parent = board})
+    mk("UIPadding", {PaddingTop = UDim.new(0, 7), PaddingBottom = UDim.new(0, 7), PaddingLeft = UDim.new(0, 7), PaddingRight = UDim.new(0, 7), Parent = board})
+    mk("UIListLayout", {Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder, Parent = board})
+    for rowIndex, row in ipairs(KB.ROWS) do
+        local units = 0
+        for _, key in ipairs(row) do units = units + (key[3] or 1) end
+        local line = mk("Frame", {Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1, LayoutOrder = rowIndex, Parent = board})
+        mk("UIListLayout", {FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder, Parent = line})
+        local gap = 3 * (#row - 1) / #row
+        for keyIndex, key in ipairs(row) do
+            local slot = mk("Frame", {Size = UDim2.new((key[3] or 1) / units, -gap, 1, 0), BackgroundTransparency = 1, LayoutOrder = keyIndex, Parent = line})
+            -- sombra de abajo (da el relieve)
+            local base = mk("Frame", {Size = UDim2.new(1, 0, 1, -2), Position = UDim2.fromOffset(0, 2), BackgroundColor3 = Color3.new(0, 0, 0), BackgroundTransparency = 0.45,
+                BorderSizePixel = 0, Parent = slot})
+            corner(base, 6)
+            local cap = mk("Frame", {Size = UDim2.new(1, 0, 1, -2), Position = UDim2.fromOffset(0, 0), BackgroundColor3 = C.Field, BackgroundTransparency = 0.1,
+                BorderSizePixel = 0, ClipsDescendants = true, Parent = slot})
+            corner(cap, 6)
+            mk("UIGradient", {Rotation = 90, Color = KB.TOP_LIGHT, Parent = cap})
+            local capStroke = stroke(cap, C.Stroke, 0.65)
+            local sheen = mk("Frame", {Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(1, 1, 1), BackgroundTransparency = 0, BorderSizePixel = 0, Visible = false, Parent = cap})
+            corner(sheen, 6)
+            local sheenGrad = mk("UIGradient", {Rotation = 20, Offset = Vector2.new(-1, 0), Transparency = NumberSequence.new({
+                NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.42, 1), NumberSequenceKeypoint.new(0.5, 0.35),
+                NumberSequenceKeypoint.new(0.58, 1), NumberSequenceKeypoint.new(1, 1)}), Parent = sheen})
+            local label = mk("TextLabel", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = key[1], TextColor3 = C.Dim,
+                Font = Enum.Font.GothamBold, TextSize = 10, TextScaled = false, ZIndex = 2, Parent = cap})
+            KB.keys[key[2]] = {cap = cap, base = base, stroke = capStroke, label = label, sheen = sheen, sheenGrad = sheenGrad}
+        end
+    end
+    -- lista de asignaciones
+    KB.list = mk("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, LayoutOrder = 2, Parent = card})
+    mk("UIListLayout", {Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder, Parent = KB.list})
+    -- las teclas se hunden cuando las apretas en el teclado de verdad
+    local function press(input, down)
+        if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+        local key = KB.keys[input.KeyCode.Name]
+        if not key then return end
+        tween(key.cap, down and 0.06 or 0.18, {Position = UDim2.fromOffset(0, down and 2 or 0)})
+        tween(key.base, down and 0.06 or 0.18, {BackgroundTransparency = down and 0.8 or 0.45})
+    end
+    track(UserInputService.InputBegan:Connect(function(input) press(input, true) end))
+    track(UserInputService.InputEnded:Connect(function(input) press(input, false) end))
+    -- al cambiar el idioma se vuelve a armar la lista con los nombres traducidos
+    local previous = Lang.onChange
+    Lang.onChange = function()
+        if previous then previous() end
+        if Hydra.refreshKeys then Hydra.refreshKeys() end
     end
 end
+
+function Hydra.refreshKeys()
+    local KB = Hydra.Keyboard
+    local used, count = {}, 0
+    -- K abre y cierra la ventana (de la libreria)
+    used.K = {tr("Abrir / cerrar Hydra")}
+    for _, bind in pairs(Hydra.Binds) do
+        if bind.code then
+            local name = bind.code.Name
+            if not used[name] then count = count + 1 end
+            used[name] = used[name] or {}
+            table.insert(used[name], tr(bind.title or "?"))
+        end
+    end
+    KB.counter.Text = tostring(count) .. " " .. tr("en uso")
+    for name, key in pairs(KB.keys) do
+        local on = used[name] ~= nil
+        tween(key.cap, 0.3, {BackgroundColor3 = on and C.Accent or C.Field, BackgroundTransparency = on and 0 or 0.1})
+        tween(key.label, 0.3, {TextColor3 = on and C.Bg or C.Dim})
+        tween(key.stroke, 0.3, {Color = on and Color3.new(1, 1, 1) or C.Stroke, Transparency = on and 0.1 or 0.65})
+        key.label.Font = on and Enum.Font.GothamBlack or Enum.Font.GothamBold
+        if on and not key.loop then
+            key.sheen.Visible = true
+            key.sheenGrad.Offset = Vector2.new(-1, 0)
+            key.loop = TweenService:Create(key.sheenGrad, KB.SHEEN, {Offset = Vector2.new(1, 0)})
+            key.loop:Play()
+        elseif not on and key.loop then
+            key.loop:Cancel()
+            key.loop = nil
+            key.sheen.Visible = false
+        end
+    end
+    for _, child in ipairs(KB.list:GetChildren()) do
+        if child:IsA("GuiObject") then child:Destroy() end
+    end
+    local names = {}
+    for name in pairs(used) do names[#names + 1] = name end
+    -- primero las teclas de las opciones, la K de la ventana al final
+    table.sort(names, function(a, b)
+        if (a == "K") ~= (b == "K") then return b == "K" end
+        return a < b
+    end)
+    for index, name in ipairs(names) do
+        local row = mk("Frame", {Size = UDim2.new(1, 0, 0, 30), BackgroundColor3 = C.Glass, BackgroundTransparency = 0.93, BorderSizePixel = 0, LayoutOrder = index, Parent = KB.list})
+        corner(row, 9)
+        stroke(row, C.Stroke, 0.78)
+        -- chip con forma de tecla
+        local chipBase = mk("Frame", {Size = UDim2.fromOffset(60, 20), Position = UDim2.new(0, 6, 0.5, -9), BackgroundColor3 = Color3.new(0, 0, 0), BackgroundTransparency = 0.45,
+            BorderSizePixel = 0, Parent = row})
+        corner(chipBase, 6)
+        local chip = mk("TextLabel", {Size = UDim2.fromOffset(60, 20), Position = UDim2.new(0, 6, 0.5, -11), BackgroundColor3 = C.Accent,
+            Text = keyName(Enum.KeyCode[name]), TextColor3 = C.Bg, Font = Enum.Font.GothamBlack, TextSize = 10, TextTruncate = Enum.TextTruncate.AtEnd, Parent = row})
+        corner(chip, 6)
+        mk("UIGradient", {Rotation = 90, Color = KB.TOP_LIGHT, Parent = chip})
+        mk("TextLabel", {Size = UDim2.new(1, -84, 1, 0), Position = UDim2.fromOffset(76, 0), BackgroundTransparency = 1, Text = table.concat(used[name], "  \194\183  "),
+            TextColor3 = name == "K" and C.Dim or C.Text, Font = Enum.Font.GothamBold, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left,
+            TextTruncate = Enum.TextTruncate.AtEnd, Parent = row})
+    end
+    -- todavia no asignaste ninguna: una pista de como hacerlo
+    if count == 0 then
+        mk("TextLabel", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, LayoutOrder = #names + 1,
+            Text = "Toc\195\161 el chip de tecla de cualquier opci\195\179n para asignarle una", TextColor3 = C.Dim, Font = Enum.Font.Gotham, TextSize = 11,
+            TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left, Parent = KB.list})
+    end
+end
+task.defer(Hydra.refreshKeys)
+
+function Hydra:Notify(text, color) toast(text, color) end
+-- traduce un texto (en espanol) al idioma del jugador, con las traducciones cargadas
+function Hydra:T(text) return tr(text) end
+-- traducciones de los textos de un script externo: {["texto en espanol"] = "english text"}
+function Hydra:AddTranslations(list)
+    for spanish, english in pairs(list) do EN[spanish] = english end
+end
+function Hydra:Select(name) selectTab(name) end
+
+return Hydra
