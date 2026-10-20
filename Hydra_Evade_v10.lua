@@ -2955,6 +2955,364 @@ Hydra:AddTranslations({
 })
 
 local TabExtra = Hydra:Tab({Id = "Extra", Title = "Extra", Caption = "EXTRA", Icon = "\226\156\142"})
+-- ==================== AVATAR (al principio de Extra) ====================
+-- Cambia tu avatar de forma VISUAL (solo en tu pantalla), igual que Yin Yang:
+--  - El cuerpo que se ve en Evade es el rig de Workspace.Rigs.<tu nombre> (RigService.buildRig le pone tu nombre;
+--    verificado en la extraccion). Se le aplica la HumanoidDescription del jugador elegido.
+--  - En R15 ese rig no tiene HumanoidRootPart (Evade lo une al personaje real con rig.Joints.Root) y Roblox rechaza
+--    ApplyDescription sin ella: se pone una raiz temporal invisible solo mientras se aplica y despues se borra.
+--  - La ropa y los accesorios que pone el juego no vienen de una HumanoidDescription: se sacan antes de aplicar.
+--  - El look se guarda (Hydra_Avatar.json) y se vuelve a poner al entrar y cada vez que Evade arma un rig nuevo.
+local Avatar = {FILE = "Hydra_Avatar.json", look = nil, saved = {}, korblox = false, deleted = false, busy = false,
+    head = {on = false, conn = nil, faces = {}}, KORBLOX_LEG = 139607718,
+    LIST_PROPS = {"HatAccessory", "HairAccessory", "FaceAccessory", "NeckAccessory", "ShouldersAccessory", "FrontAccessory", "BackAccessory", "WaistAccessory"},
+    ID_PROPS = {"HatAccessory", "HairAccessory", "FaceAccessory", "NeckAccessory", "ShouldersAccessory", "FrontAccessory", "BackAccessory", "WaistAccessory",
+        "Shirt", "Pants", "GraphicTShirt", "Face", "Head", "Torso", "LeftArm", "RightArm", "LeftLeg", "RightLeg"},
+    COLOR_PROPS = {"HeadColor", "TorsoColor", "LeftArmColor", "RightArmColor", "LeftLegColor", "RightLegColor"},
+    SCALE_PROPS = {"BodyTypeScale", "DepthScale", "HeadScale", "HeightScale", "ProportionScale", "WidthScale"}}
+function Avatar.rig()
+    local rigs = workspace:FindFirstChild("Rigs")
+    local rig = rigs and rigs:FindFirstChild(LocalPlayer.Name)
+    return rig, rig and rig:FindFirstChildOfClass("Humanoid")
+end
+-- si ApplyDescription cambio una parte del cuerpo, las uniones de rig.Joints quedan en la parte vieja: se reconectan
+-- a la nueva con el mismo nombre (las que van al personaje real no se tocan)
+function Avatar.repairJoints(rig)
+    local joints = rig and rig:FindFirstChild("Joints")
+    if not joints then return end
+    for _, joint in ipairs(joints:GetDescendants()) do
+        if joint:IsA("JointInstance") then
+            for _, key in ipairs({"Part0", "Part1"}) do
+                local part = joint[key]
+                if part and not part:IsDescendantOf(workspace) then
+                    local replacement = rig:FindFirstChild(part.Name)
+                    if replacement and replacement:IsA("BasePart") then joint[key] = replacement end
+                end
+            end
+        end
+    end
+end
+function Avatar.applySafe(humanoid, description)
+    local rig = humanoid and humanoid.Parent
+    if rig and not rig:FindFirstChild("HumanoidRootPart") then
+        local tempRoot = Instance.new("Part")
+        tempRoot.Name = "HumanoidRootPart"
+        tempRoot.Size = Vector3.new(2, 2, 1)
+        tempRoot.Transparency = 1
+        tempRoot.CanCollide, tempRoot.CanQuery, tempRoot.CanTouch = false, false, false
+        tempRoot.Massless = true
+        tempRoot.Anchored = false
+        local reference = nil
+        pcall(function()
+            local joints = rig:FindFirstChild("Joints")
+            local rootJoint = joints and joints:FindFirstChild("Root")
+            if rootJoint and rootJoint.Part0 and rootJoint.Part0:IsDescendantOf(workspace) then reference = rootJoint.Part0 end
+        end)
+        reference = reference or rig:FindFirstChild("LowerTorso") or rig:FindFirstChild("Torso")
+        if reference then tempRoot.CFrame = reference.CFrame end
+        tempRoot.Parent = rig
+        -- solo ApplyDescription (cambia lo distinto): ApplyDescriptionReset reconstruye todo el cuerpo
+        local ok, err = pcall(function() humanoid:ApplyDescription(description) end)
+        pcall(function() tempRoot:Destroy() end)
+        pcall(Avatar.repairJoints, rig)
+        if ok then return true end
+        return false, tostring(err)
+    end
+    local okReset, errReset = pcall(function() humanoid:ApplyDescriptionReset(description) end)
+    if okReset then pcall(Avatar.repairJoints, rig) return true end
+    local okDiff, errDiff = pcall(function() humanoid:ApplyDescription(description) end)
+    pcall(Avatar.repairJoints, rig)
+    if okDiff then return true end
+    return false, tostring(errDiff or errReset)
+end
+-- una pieza sola (Korblox): solo ApplyDescription; sin HumanoidRootPart usa la raiz temporal
+function Avatar.applyPart(humanoid, description)
+    local rig = humanoid and humanoid.Parent
+    if rig and not rig:FindFirstChild("HumanoidRootPart") then return Avatar.applySafe(humanoid, description) end
+    local ok, err = pcall(function() humanoid:ApplyDescription(description) end)
+    pcall(Avatar.repairJoints, rig)
+    if ok then return true end
+    return false, tostring(err)
+end
+-- saca la ropa y los accesorios que puso el juego (la carpeta Joints no se toca)
+function Avatar.strip(rig)
+    if not rig then return end
+    local joints = rig:FindFirstChild("Joints")
+    for _, d in ipairs(rig:GetDescendants()) do
+        if (d:IsA("Accoutrement") or d:IsA("Clothing") or d:IsA("ShirtGraphic")) and not (joints and d:IsDescendantOf(joints)) then
+            pcall(function() d:Destroy() end)
+        end
+    end
+end
+function Avatar.removeHeadItems(rig)
+    if not rig then return end
+    local types = {Hat = true, Hair = true, Face = true, Eyebrow = true, Eyelash = true}
+    local attachments = {HatAttachment = true, HairAttachment = true, FaceFrontAttachment = true, FaceCenterAttachment = true}
+    for _, child in ipairs(rig:GetChildren()) do
+        if child:IsA("Accessory") then
+            local isHead = false
+            pcall(function() isHead = types[child.AccessoryType.Name] == true end)
+            if not isHead then
+                local handle = child:FindFirstChild("Handle")
+                local attachment = handle and handle:FindFirstChildOfClass("Attachment")
+                isHead = attachment ~= nil and attachments[attachment.Name] == true
+            end
+            if isHead then pcall(function() child:Destroy() end) end
+        end
+    end
+end
+
+-- ---------- guardar el look ----------
+function Avatar.saveFile()
+    if type(writefile) ~= "function" then return end
+    pcall(function()
+        if Avatar.look then
+            writefile(Avatar.FILE, game:GetService("HttpService"):JSONEncode(Avatar.look))
+        elseif type(isfile) == "function" and isfile(Avatar.FILE) and type(delfile) == "function" then
+            delfile(Avatar.FILE)
+        else
+            writefile(Avatar.FILE, "null")
+        end
+    end)
+end
+function Avatar.loadFile()
+    if type(readfile) ~= "function" or type(isfile) ~= "function" then return end
+    pcall(function()
+        if not isfile(Avatar.FILE) then return end
+        local data = game:GetService("HttpService"):JSONDecode(readfile(Avatar.FILE))
+        if type(data) == "table" then Avatar.look = data end
+    end)
+end
+function Avatar.remember(desc, strip)
+    if not desc then return end
+    local look = {props = {}, colors = {}, scales = {}, layered = {}, strip = strip == true}
+    for _, p in ipairs(Avatar.ID_PROPS) do
+        local ok, v = pcall(function() return desc[p] end)
+        if ok and v ~= nil then look.props[p] = v end
+    end
+    -- con Korblox puesto se guarda la pierna original (el toggle la vuelve a cambiar)
+    if Avatar.saved.RightLeg ~= nil then look.props.RightLeg = Avatar.saved.RightLeg end
+    for _, p in ipairs(Avatar.COLOR_PROPS) do
+        pcall(function()
+            local c = desc[p]
+            if typeof(c) == "Color3" then look.colors[p] = {c.R, c.G, c.B} end
+        end)
+    end
+    for _, p in ipairs(Avatar.SCALE_PROPS) do
+        pcall(function()
+            local n = tonumber(desc[p])
+            if n then look.scales[p] = n end
+        end)
+    end
+    pcall(function()
+        for _, e in ipairs(desc:GetAccessories(false)) do
+            local typeName = nil
+            pcall(function() typeName = e.AccessoryType.Name end)
+            if e.AssetId and typeName then table.insert(look.layered, {id = e.AssetId, t = typeName, o = e.Order}) end
+        end
+    end)
+    Avatar.look = look
+    Avatar.saveFile()
+end
+function Avatar.restoreLook()
+    local look = Avatar.look
+    if type(look) ~= "table" then return false end
+    local rig, humanoid = Avatar.rig()
+    if not (rig and humanoid) then return false end
+    local ok, desc = pcall(function() return humanoid:GetAppliedDescription() end)
+    if not ok or not desc then return false end
+    for p, v in pairs(look.props or {}) do
+        pcall(function()
+            if table.find(Avatar.LIST_PROPS, p) then desc[p] = tostring(v) else desc[p] = tonumber(v) or 0 end
+        end)
+    end
+    for p, c in pairs(look.colors or {}) do pcall(function() desc[p] = Color3.new(c[1], c[2], c[3]) end) end
+    for p, n in pairs(look.scales or {}) do pcall(function() desc[p] = tonumber(n) end) end
+    if type(look.layered) == "table" then
+        local list = {}
+        for i, e in ipairs(look.layered) do
+            local okT, accessoryType = pcall(function() return Enum.AccessoryType[e.t] end)
+            if okT and accessoryType then
+                list[#list + 1] = {AssetId = tonumber(e.id), AccessoryType = accessoryType, IsLayered = true, Order = tonumber(e.o) or i}
+            end
+        end
+        pcall(function() desc:SetAccessories(list, false) end)
+    end
+    if look.strip then pcall(Avatar.strip, rig) end
+    return (Avatar.applySafe(humanoid, desc)) == true
+end
+
+-- ---------- piezas: Korblox y Headless ----------
+function Avatar.setKorblox(on)
+    local rig, humanoid = Avatar.rig()
+    if not (rig and humanoid) then return false end
+    local ok, desc = pcall(function() return humanoid:GetAppliedDescription() end)
+    if not ok or not desc then return false end
+    if on then
+        if Avatar.saved.RightLeg == nil then Avatar.saved.RightLeg = desc.RightLeg end
+        desc.RightLeg = Avatar.KORBLOX_LEG
+    else
+        desc.RightLeg = Avatar.saved.RightLeg or 0
+        Avatar.saved.RightLeg = nil
+    end
+    return (Avatar.applyPart(humanoid, desc)) == true
+end
+-- Headless: la cabeza y la cara del rig se esconden en cada cuadro (Evade vuelve a poner LocalTransparencyModifier = 0).
+-- Se busca el rig cada vez, asi sigue andando si Evade arma uno nuevo. Al apagar se devuelve todo.
+function Avatar.setHeadless(on)
+    local state = Avatar.head
+    if on then
+        if state.conn then return end
+        state.on = true
+        state.conn = RunService.RenderStepped:Connect(function()
+            local rig = Avatar.rig()
+            local head = rig and rig:FindFirstChild("Head")
+            if not head or not head:IsA("BasePart") then return end
+            head.LocalTransparencyModifier = 1
+            for _, child in ipairs(head:GetChildren()) do
+                if child:IsA("Decal") then
+                    if state.faces[child] == nil then state.faces[child] = child.Transparency end
+                    child.Transparency = 1
+                end
+            end
+        end)
+        return
+    end
+    if state.conn then pcall(function() state.conn:Disconnect() end) end
+    for decal, transparency in pairs(state.faces) do
+        pcall(function() if decal.Parent then decal.Transparency = transparency end end)
+    end
+    pcall(function()
+        local rig = Avatar.rig()
+        local head = rig and rig:FindFirstChild("Head")
+        if head and head:IsA("BasePart") then head.LocalTransparencyModifier = 0 end
+    end)
+    Avatar.head = {on = false, conn = nil, faces = {}}
+end
+
+-- vuelve a poner todo lo guardado (al entrar, con un rig nuevo o despues de cambiar de avatar)
+function Avatar.reapply()
+    pcall(Avatar.restoreLook)
+    Avatar.saved.RightLeg = nil
+    if Avatar.korblox then pcall(Avatar.setKorblox, true) end
+    if Avatar.deleted then pcall(Avatar.removeHeadItems, (Avatar.rig())) end
+end
+function Avatar.hasSaved() return Avatar.look ~= nil or Avatar.korblox or Avatar.deleted end
+
+-- ---------- acciones de la interfaz ----------
+function Avatar.applyUser(info)
+    if Avatar.busy then return false, "Esper\195\161 un momento" end
+    local rig, humanoid = Avatar.rig()
+    if not (rig and humanoid) then return false, "Entr\195\161 a una partida primero" end
+    Avatar.busy = true
+    local okDesc, desc = pcall(function() return Players:GetHumanoidDescriptionFromUserId(info.id) end)
+    if not okDesc or not desc then Avatar.busy = false return false, "No se pudo cargar el avatar" end
+    rig, humanoid = Avatar.rig() -- el rig puede haber cambiado mientras cargaba
+    if not (rig and humanoid) then Avatar.busy = false return false, "Entr\195\161 a una partida primero" end
+    pcall(Avatar.strip, rig)
+    local ok = Avatar.applySafe(humanoid, desc)
+    if not ok then Avatar.busy = false return false, "No se pudo aplicar el avatar" end
+    Avatar.saved.RightLeg = nil
+    Avatar.remember(desc, true)
+    if Avatar.korblox then pcall(Avatar.setKorblox, true) end
+    if Avatar.deleted then pcall(Avatar.removeHeadItems, rig) end
+    Avatar.busy = false
+    return true, "\226\156\147 Avatar aplicado"
+end
+function Avatar.reset()
+    if Avatar.busy then return false, "Esper\195\161 un momento" end
+    local rig, humanoid = Avatar.rig()
+    if not (rig and humanoid) then return false, "Entr\195\161 a una partida primero" end
+    Avatar.busy = true
+    local okDesc, desc = pcall(function() return Players:GetHumanoidDescriptionFromUserId(LocalPlayer.UserId) end)
+    if not okDesc or not desc then Avatar.busy = false return false, "No se pudo cargar tu avatar" end
+    -- se apaga todo y se borra el look guardado (si no, se volveria a poner al reaparecer)
+    for _, id in ipairs({"avKorblox", "avHeadless", "avDeleted"}) do
+        local option = Hydra.Options[id]
+        if option then option:Set(false, true) end
+    end
+    Avatar.korblox, Avatar.deleted = false, false
+    Avatar.saved = {}
+    Avatar.setHeadless(false)
+    Avatar.look = nil
+    Avatar.saveFile()
+    rig, humanoid = Avatar.rig()
+    if not (rig and humanoid) then Avatar.busy = false return false, "Entr\195\161 a una partida primero" end
+    pcall(Avatar.strip, rig)
+    local ok = Avatar.applySafe(humanoid, desc)
+    Avatar.busy = false
+    if not ok then return false, "No se pudo restablecer" end
+    return true, "\226\156\147 Tu skin original volvi\195\179"
+end
+
+Hydra:AddTranslations({
+    ["Avatar"] = "Avatar",
+    ["Esper\195\161 un momento"] = "Wait a moment", ["Entr\195\161 a una partida primero"] = "Join a match first",
+    ["No se pudo cargar el avatar"] = "The avatar could not be loaded", ["No se pudo aplicar el avatar"] = "The avatar could not be applied",
+    ["\226\156\147 Avatar aplicado"] = "\226\156\147 Avatar applied", ["No se pudo cargar tu avatar"] = "Your avatar could not be loaded",
+    ["No se pudo restablecer"] = "Could not reset", ["\226\156\147 Tu skin original volvi\195\179"] = "\226\156\147 Your original skin is back",
+    ["Restablecer skin"] = "Reset skin", ["Vuelve a tu avatar original"] = "Goes back to your original avatar",
+    ["Pierna Korblox"] = "Korblox leg", ["Pierna derecha Korblox"] = "Korblox right leg",
+    ["Cabeza invisible"] = "Invisible head", ["Sin cabeza y sin accesorios de la cabeza"] = "No head and no head accessories",
+    ["Se pone cuando entres a una partida"] = "It applies when you join a match",
+})
+
+TabExtra:Section("Avatar", "rbxassetid://91028192488544")
+local AvatarSearch = TabExtra:PlayerSearch({Placeholder = "Nombre de usuario", ButtonText = "Aplicar",
+    Callback = function(info) return Avatar.applyUser(info) end})
+TabExtra:Button({Title = "Restablecer skin", Desc = "Vuelve a tu avatar original", Icon = "rbxassetid://91028192488544",
+    Callback = function()
+        task.spawn(function()
+            local ok, message = Avatar.reset()
+            AvatarSearch:SetStatus(message, ok and "ok" or "bad")
+            Hydra:Notify(Hydra:T(message))
+        end)
+    end})
+TabExtra:Toggle({Id = "avKorblox", Title = "Pierna Korblox", Desc = "Pierna derecha Korblox", Icon = "rbxassetid://91028192488544",
+    Callback = function(on)
+        Avatar.korblox = on
+        task.spawn(function()
+            if not Avatar.rig() then
+                if on then Hydra:Notify(Hydra:T("Se pone cuando entres a una partida")) end
+                return
+            end
+            if not on and Avatar.saved.RightLeg == nil then return end
+            pcall(Avatar.setKorblox, on)
+        end)
+    end})
+local HeadlessToggle, DeletedToggle
+HeadlessToggle = TabExtra:Toggle({Id = "avHeadless", Title = "Headless", Desc = "Cabeza invisible", Icon = "rbxassetid://91028192488544",
+    Callback = function(on)
+        if on and DeletedToggle and DeletedToggle:Get() then DeletedToggle:Set(false, true) Avatar.deleted = false end
+        Avatar.setHeadless(on or (DeletedToggle ~= nil and DeletedToggle:Get()))
+    end})
+DeletedToggle = TabExtra:Toggle({Id = "avDeleted", Title = "Headless + Deleted", Desc = "Sin cabeza y sin accesorios de la cabeza", Icon = "rbxassetid://91028192488544",
+    Callback = function(on)
+        if on and HeadlessToggle:Get() then HeadlessToggle:Set(false, true) end
+        Avatar.deleted = on
+        Avatar.setHeadless(on or HeadlessToggle:Get())
+        if on then pcall(Avatar.removeHeadItems, (Avatar.rig())) end
+    end})
+Avatar.korblox, Avatar.deleted = Hydra.Options.avKorblox:Get(), DeletedToggle:Get()
+
+-- al entrar: espera tu rig y pone lo guardado; si Evade arma un rig nuevo para vos, lo vuelve a poner
+Avatar.loadFile()
+task.spawn(function()
+    if Avatar.hasSaved() then
+        local waited = 0
+        while waited < 120 and not Avatar.rig() do task.wait(1) waited = waited + 1 end
+        if Avatar.rig() then task.wait(1) pcall(Avatar.reapply) end
+    end
+    local rigs = workspace:WaitForChild("Rigs", 60)
+    if rigs then
+        rigs.ChildAdded:Connect(function(child)
+            if child.Name ~= LocalPlayer.Name or not Avatar.hasSaved() then return end
+            task.wait(2)
+            pcall(Avatar.reapply)
+        end)
+    end
+end)
+
 TabExtra:Section("Unlock All", "\226\156\142")
 local UnlockToggle
 UnlockToggle = TabExtra:Toggle({Id = "unlockAll", Title = "Unlock All", Desc = "Desbloquea todo de forma visual (solo lo ves vos)", Icon = "\226\156\142", Keybind = true, Floating = true,
