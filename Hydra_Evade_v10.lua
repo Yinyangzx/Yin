@@ -148,8 +148,8 @@ end
 function Front.new(sign)
     local F = {
         Enabled = false, Sign = sign, MaxSpeed = 99, Accel = 9, Smooth = true, FollowMove = false,
-        RampPower = 42, RampMult = 1.55, RampSpeedBoost = true,
-        Speed = 0, Dir = Vector3.new(1, 0, 0), Seen = 0, LastAuto = 0, LastAir = 0, BoostUntil = 0,
+        RampPower = 42, RampMult = 1.55, BoostManual = false,
+        Speed = 0, Dir = Vector3.new(1, 0, 0), Seen = 0, LastAuto = 0, LastAir = 0, WasGrounded = true, OurJumpUntil = 0,
     }
     function F.wantedDir(hum)
         if F.FollowMove then
@@ -162,18 +162,19 @@ function Front.new(sign)
         local flat = Vector3.new(look.X, 0, look.Z)
         return flat.Magnitude > 0.05 and flat.Unit or nil
     end
+
     function F.step(ctx)
         if not F.Enabled then F.Speed = 0 return end
-        local dir = F.wantedDir(ctx.hum)
-        local moving = dir ~= nil and (not F.FollowMove or ctx.hum.MoveDirection.Magnitude > 0.05)
-        if dir then F.Dir = dir end
-        local now = os.clock()
-        local target = moving and F.MaxSpeed or 0
-
-        if F.RampSpeedBoost and now < F.BoostUntil and moving then
-            local left = (F.BoostUntil - now) / 0.8
-            target = target * (1 + (F.RampMult - 1) * 0.5 * left)
+        local hum, root = ctx.hum, ctx.root
+        local grounded = ctx.grounded
+        if ctx.registry then
+            local okG, g = pcall(function() return ctx.registry:Get("Grounded") end)
+            grounded = (okG and g ~= nil) and (g == true) or hum.FloorMaterial ~= Enum.Material.Air
         end
+        local dir = F.wantedDir(hum)
+        local moving = dir ~= nil and (not F.FollowMove or hum.MoveDirection.Magnitude > 0.05)
+        if dir then F.Dir = dir end
+        local target = moving and F.MaxSpeed or 0
         if F.Smooth then
             local rate = target > F.Speed and F.Accel or F.Accel * 0.6
             F.Speed = F.Speed + (target - F.Speed) * math.min(rate * ctx.dt, 1)
@@ -182,24 +183,33 @@ function Front.new(sign)
         end
         local vel = F.Dir * F.Speed
         if ctx.registry then pcall(function() ctx.registry:Set("Velocity", vel * 90) end) end
-        local cur = ctx.root.AssemblyLinearVelocity
-        ctx.root.AssemblyLinearVelocity = Vector3.new(vel.X, cur.Y, vel.Z)
+        local cur = root.AssemblyLinearVelocity
+        root.AssemblyLinearVelocity = Vector3.new(vel.X, cur.Y, vel.Z)
 
-        if not moving or F.Speed <= 3 then F.Seen = 0 return end
-        local hit, isRamp = Front.obstacle(ctx.char, ctx.root, F.Dir, F.Speed)
-        F.Seen = hit and F.Seen + 1 or 0
-        if F.Seen < 2 then return end
+        local now = os.clock()
         local lift = F.RampPower * F.RampMult * 0.8
-        if ctx.grounded and now - F.LastAuto > 0.45 then
-            F.LastAuto = now
-            if isRamp then F.BoostUntil = now + 0.8 end
-            ctx.jump()
-            local root = ctx.root
-            task.delay(0.1, function() if root.Parent then Front.lift(root, lift) end end)
-        elseif not ctx.grounded and now - F.LastAir > 0.3 then
-            F.LastAir = now
-            Front.lift(ctx.root, lift * 0.6)
+        if moving and F.Speed > 3 then
+            local hit = Front.obstacle(ctx.char, root, F.Dir, F.Speed)
+            F.Seen = hit and F.Seen + 1 or 0
+            if F.Seen < 2 then hit = nil end
+            if hit then
+                if grounded and now - F.LastAuto > 0.45 then
+                    F.LastAuto = now
+                    F.OurJumpUntil = now + 0.4
+                    ctx.jump()
+                    task.delay(0.1, function() if root.Parent then Front.lift(root, lift) end end)
+                elseif not grounded and now - F.LastAir > 0.3 then
+                    F.LastAir = now
+                    Front.lift(root, lift * 0.6)
+                end
+            end
         end
+
+        if F.BoostManual and ctx.jumpHeld and F.WasGrounded and not grounded and now > F.OurJumpUntil then
+            F.OurJumpUntil = now + 0.4
+            Front.lift(root, lift)
+        end
+        F.WasGrounded = grounded
     end
     return F
 end
@@ -464,7 +474,7 @@ Hydra:AddTranslations({
     ["Aceleraci\195\179n"] = "Acceleration", ["Qu\195\169 tan r\195\161pido llega a la velocidad"] = "How fast it reaches the speed",
     ["Multiplicador de rampa"] = "Ramp multiplier", ["Cu\195\161nto te impulsa una rampa"] = "How hard a ramp launches you",
     ["Fuerza de rampa"] = "Ramp power", ["Fuerza base del salto en rampas"] = "Base jump power on ramps",
-    ["Acelerar en rampas"] = "Speed up on ramps", ["Gana velocidad un momento al pasar una rampa"] = "Gains speed for a moment after a ramp",
+    ["Potenciar mis saltos"] = "Boost my jumps", ["Tus saltos usan la fuerza y el multiplicador de rampa"] = "Your jumps use the ramp power and multiplier",
     ["Suave"] = "Smooth", ["Acelera y frena de a poco"] = "Speeds up and slows down gradually",
     ["Seguir movimiento"] = "Follow movement", ["Va hacia donde camin\195\161s, no hacia la c\195\161mara"] = "Goes where you walk, not where the camera looks",
     ["Saltos extra en el aire"] = "Extra jumps in the air",
@@ -527,20 +537,20 @@ local function frontToggle(F, other, otherId, prefix, title, desc, icon, followD
         Callback = function(v) F.RampMult = v end})
     toggle:Slider({Id = prefix .. "RampPower", Title = "Fuerza de rampa", Desc = "Fuerza base del salto en rampas", Min = 30, Max = 110, Step = 1, Default = 42,
         Callback = function(v) F.RampPower = v end})
-    toggle:Toggle({Id = prefix .. "RampSpeed", Title = "Acelerar en rampas", Desc = "Gana velocidad un momento al pasar una rampa", Default = true,
-        Callback = function(on) F.RampSpeedBoost = on end})
     toggle:Toggle({Id = prefix .. "Smooth", Title = "Suave", Desc = "Acelera y frena de a poco", Default = true,
         Callback = function(on) F.Smooth = on end})
     toggle:Toggle({Id = prefix .. "Follow", Title = "Seguir movimiento", Desc = followDesc,
         Callback = function(on) F.FollowMove = on end})
+    toggle:Toggle({Id = prefix .. "Boost", Title = "Potenciar mis saltos", Desc = "Tus saltos usan la fuerza y el multiplicador de rampa",
+        Callback = function(on) F.BoostManual = on end})
 
     F.MaxSpeed = Hydra.Options[prefix .. "Speed"]:Get()
     F.Accel = Hydra.Options[prefix .. "Accel"]:Get()
     F.RampMult = Hydra.Options[prefix .. "RampMult"]:Get()
     F.RampPower = Hydra.Options[prefix .. "RampPower"]:Get()
-    F.RampSpeedBoost = Hydra.Options[prefix .. "RampSpeed"]:Get()
     F.Smooth = Hydra.Options[prefix .. "Smooth"]:Get()
     F.FollowMove = Hydra.Options[prefix .. "Follow"]:Get()
+    F.BoostManual = Hydra.Options[prefix .. "Boost"]:Get()
     return toggle
 end
 frontToggle(SF, BF, "backFront", "sf", "Speed Front", "Te lleva hacia adelante sin trabarse", "rbxassetid://116954340494960", "Va hacia donde camin\195\161s, no hacia la c\195\161mara")
@@ -661,33 +671,48 @@ function More.myRoot()
 end
 function More.event(name) return Core.module("Events", name) end
 
-local AutoCarry = {Enabled = false, Range = 30, Interval = 0.2}
-task.spawn(function()
-    while true do
-        task.wait(AutoCarry.Interval)
-        if AutoCarry.Enabled then
-            pcall(function()
-                local root = More.myRoot()
-                local me = More.data(LocalPlayer)
-                local interact = More.event("Interact")
-                if not root or not me or not interact then return end
-                if More.isSet(More.reg(me, "Carrying")) or More.reg(me, "Downed") then return end
-                for _, other in ipairs(Players:GetPlayers()) do
-                    local char = other ~= LocalPlayer and other.Character
-                    local otherRoot = char and char:FindFirstChild("HumanoidRootPart")
-                    local data = otherRoot and More.data(other)
-                    if data and More.reg(data, "Downed") and not More.isSet(More.reg(data, "Carried"))
-                        and More.reg(data, "CanBeCarried") ~= false and not More.reg(data, "Ragdolling")
-                        and (otherRoot.Position - root.Position).Magnitude <= AutoCarry.Range then
-                        local tag = char:GetAttribute("Tag")
-                        if tag then
-                            interact:FireServer("Carry", tag)
-                            return
-                        end
+local AutoCarry = {Enabled = false, Range = 30, Interval = 0.2, Last = 0,
+    STATES = {Carry = true, CarrySlide = true, CarrySlideAir = true, CarryAir = true, Carried = true, CarryMove = true, CarryIdle = true}}
+function AutoCarry.ragdolled(player, data)
+    local char = player.Character
+    if not char then return false end
+    if char:FindFirstChild("RagdollConstraints") then return true end
+    if data and More.reg(data, "Ragdolling") then return true end
+    if char.PrimaryPart and char.PrimaryPart.Anchored then return true end
+    return false
+end
+function AutoCarry.step()
+    local root = More.myRoot()
+    if not root then return end
+    local me = More.data(LocalPlayer)
+    local movement = me and me.Movement
+    if not movement or AutoCarry.STATES[movement.State] then return end
+    local interact = More.event("Interact")
+    if not interact then return end
+    local now = tick()
+    if now - AutoCarry.Last < AutoCarry.Interval then return end
+    for _, other in ipairs(Players:GetPlayers()) do
+        if other ~= LocalPlayer then
+            local char = other.Character
+            local data = char and More.data(other)
+            if data and More.reg(data, "Downed") and not AutoCarry.ragdolled(other, data) then
+                local otherRoot = char:FindFirstChild("HumanoidRootPart")
+                if otherRoot and (root.Position - otherRoot.Position).Magnitude <= AutoCarry.Range then
+                    local tag = char:GetAttribute("Tag")
+                    if tag then
+                        pcall(function() interact:FireServer("Carry", tag) end)
+                        AutoCarry.Last = now
+                        break
                     end
                 end
-            end)
+            end
         end
+    end
+end
+task.spawn(function()
+    while true do
+        if AutoCarry.Enabled then pcall(AutoCarry.step) end
+        task.wait(AutoCarry.Interval > 0 and AutoCarry.Interval or 0.2)
     end
 end)
 
