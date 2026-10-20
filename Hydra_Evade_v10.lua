@@ -3257,10 +3257,10 @@ Hydra:AddTranslations({
     ["Se pone cuando entres a una partida"] = "It applies when you join a match",
 })
 
-TabExtra:Section("Avatar", "rbxassetid://91028192488544")
+TabExtra:Section("Avatar", "A")
 local AvatarSearch = TabExtra:PlayerSearch({Placeholder = "Nombre de usuario", ButtonText = "Aplicar",
     Callback = function(info) return Avatar.applyUser(info) end})
-TabExtra:Button({Title = "Restablecer skin", Desc = "Vuelve a tu avatar original", Icon = "rbxassetid://91028192488544",
+TabExtra:Button({Title = "Restablecer skin", Desc = "Vuelve a tu avatar original", Icon = "A",
     Callback = function()
         task.spawn(function()
             local ok, message = Avatar.reset()
@@ -3268,7 +3268,7 @@ TabExtra:Button({Title = "Restablecer skin", Desc = "Vuelve a tu avatar original
             Hydra:Notify(Hydra:T(message))
         end)
     end})
-TabExtra:Toggle({Id = "avKorblox", Title = "Pierna Korblox", Desc = "Pierna derecha Korblox", Icon = "rbxassetid://91028192488544",
+TabExtra:Toggle({Id = "avKorblox", Title = "Pierna Korblox", Desc = "Pierna derecha Korblox", Icon = "A",
     Callback = function(on)
         Avatar.korblox = on
         task.spawn(function()
@@ -3281,12 +3281,12 @@ TabExtra:Toggle({Id = "avKorblox", Title = "Pierna Korblox", Desc = "Pierna dere
         end)
     end})
 local HeadlessToggle, DeletedToggle
-HeadlessToggle = TabExtra:Toggle({Id = "avHeadless", Title = "Headless", Desc = "Cabeza invisible", Icon = "rbxassetid://91028192488544",
+HeadlessToggle = TabExtra:Toggle({Id = "avHeadless", Title = "Headless", Desc = "Cabeza invisible", Icon = "A",
     Callback = function(on)
         if on and DeletedToggle and DeletedToggle:Get() then DeletedToggle:Set(false, true) Avatar.deleted = false end
         Avatar.setHeadless(on or (DeletedToggle ~= nil and DeletedToggle:Get()))
     end})
-DeletedToggle = TabExtra:Toggle({Id = "avDeleted", Title = "Headless + Deleted", Desc = "Sin cabeza y sin accesorios de la cabeza", Icon = "rbxassetid://91028192488544",
+DeletedToggle = TabExtra:Toggle({Id = "avDeleted", Title = "Headless + Deleted", Desc = "Sin cabeza y sin accesorios de la cabeza", Icon = "A",
     Callback = function(on)
         if on and HeadlessToggle:Get() then HeadlessToggle:Set(false, true) end
         Avatar.deleted = on
