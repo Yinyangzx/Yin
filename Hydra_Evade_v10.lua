@@ -17,7 +17,7 @@ local LocalPlayer = Players.LocalPlayer
 --    el evento ModifyMovement del juego. JumpCap = 1 en BaseStats (0 saltos en el aire); cada punto extra = 1 salto mas.
 -- En Solara require() crea copias de los modulos: ahi se usa un modo sin require (Stepped) para Speed Front
 -- y firesignal (si existe) para Jump Layers.
-local Core = {steps = {}, hooked = false, safeMode = false}
+local Core = {steps = {}, preSteps = {}, hooked = false, safeMode = false}
 pcall(function()
     if identifyexecutor then
         Core.safeMode = string.find(string.lower(tostring(identifyexecutor())), "solara", 1, true) ~= nil
@@ -54,6 +54,10 @@ function Core.hook()
     if not ok or type(Movement) ~= "table" or type(Movement.Update) ~= "function" then return false end
     local old = Movement.Update
     Movement.Update = function(self, dt, ...)
+        -- pasos que corren ANTES del juego (por ejemplo, devolver la friccion al soltar el slide)
+        if self.Character and self.Character == LocalPlayer.Character then
+            for _, fn in pairs(Core.preSteps) do pcall(fn, self) end
+        end
         old(self, dt, ...)
         if not (self.Character and self.Character == LocalPlayer.Character) then return end
         local hrp = self.Character:FindFirstChild("HumanoidRootPart")
@@ -254,6 +258,62 @@ Core.steps.speedWithJump = function(ctx)
         if ctx.registry then pcall(function() ctx.registry:Set("Velocity", vel * 90) end) end
         ctx.root.AssemblyLinearVelocity = Vector3.new(vel.X, ctx.root.AssemblyLinearVelocity.Y, vel.Z)
     end
+end
+
+-- ==================== INFINITE SLIDE ====================
+-- Misma logica de Yin Yang (Dara): mientras estas en Slide y mantenes agacharte, la friccion del slide pasa a ser
+-- negativa (-Velocidad): el slide no frena y acelera. Estados verificados en StateInfo: Slide, EmotingSlide, CarrySlide.
+-- Arreglos de Yin Yang (v53/v54): al soltar agacharte la friccion vuelve a 5 ANTES de que el juego calcule (si no, te
+-- manda volando) y durante 0,4 s se limita la velocidad al tope de correr y el "salto" hacia arriba al pararte.
+local IS = {Enabled = false, Boost = 8, Applied = nil, ExitUntil = 0, Cap = 3000, Jumped = false,
+    SLIDES = {Slide = true, EmotingSlide = true, CarrySlide = true}}
+function IS.crouchHeld(movement)
+    local ok, held = pcall(function() return movement.DataRegistry:Get("CrouchKey") end)
+    return ok and held == true
+end
+function IS.setFriction(movement, value)
+    if IS.Applied == value then return end
+    IS.Applied = value
+    pcall(function()
+        local stats = movement.MoveStats
+        stats.Modifiers = stats.Modifiers or {}
+        stats.Modifiers.Friction = value
+        stats:Reset()
+    end)
+end
+function IS.exitGuard(movement)
+    local cap = IS.Cap
+    local v = movement.DataRegistry:Get("Velocity")
+    if typeof(v) == "Vector3" and v.Magnitude > cap then movement.DataRegistry:Set("Velocity", v.Unit * cap) end
+    local root = movement.Character and movement.Character:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+    local av = root.AssemblyLinearVelocity
+    local flat = Vector3.new(av.X, 0, av.Z)
+    local vy = av.Y
+    if movement.JumpHeldDown == true then IS.Jumped = true end
+    if not IS.Jumped and vy > 4 then vy = 0 end
+    if flat.Magnitude > cap / 90 then flat = flat.Unit * (cap / 90) end
+    root.AssemblyLinearVelocity = Vector3.new(flat.X, vy, flat.Z)
+end
+-- antes del juego: si soltaste agacharte con la friccion negativa puesta, vuelve a la normal en el acto
+Core.preSteps.infiniteSlide = function(movement)
+    if os.clock() < IS.ExitUntil then pcall(IS.exitGuard, movement) end
+    if IS.Applied == nil or IS.crouchHeld(movement) then return end
+    IS.setFriction(movement, nil)
+    pcall(function()
+        local stats = movement.MoveStats.MoveStats
+        IS.Cap = (tonumber(stats.Speed) or 1500) * (tonumber(stats.SprintCap) or 2)
+    end)
+    IS.Jumped = movement.JumpHeldDown == true
+    IS.ExitUntil = os.clock() + 0.4
+    pcall(IS.exitGuard, movement)
+end
+-- despues del juego: en slide y agachado = friccion negativa
+Core.steps.infiniteSlide = function(ctx)
+    local movement = ctx.movement
+    if not movement then return end
+    local sliding = IS.Enabled and IS.SLIDES[movement.State] == true and IS.crouchHeld(movement)
+    IS.setFriction(movement, sliding and -IS.Boost or nil)
 end
 
 -- ==================== AUTO CROUCH ====================
@@ -472,6 +532,8 @@ Hydra:AddTranslations({
     ["Solo al caminar"] = "Only while walking", ["Si no te mov\195\169s, no salta"] = "If you don't move, it doesn't jump",
     ["Se agacha y se levanta solo"] = "Crouches and stands up by itself",
     ["Cambia qu\195\169 tan r\195\161pido corr\195\169s"] = "Changes how fast you run",
+    ["El slide no frena mientras manten\195\169s agacharte"] = "The slide never slows down while you hold crouch",
+    ["Velocidad del slide"] = "Slide speed", ["M\195\161s alto = acelera m\195\161s r\195\161pido"] = "Higher = speeds up faster",
     ["Qu\195\169 tan alto salt\195\161s"] = "How high you jump", ["Altura"] = "Height", ["Normal del juego: 3"] = "Game default: 3", ["Normal del juego: 33"] = "Game default: 33",
     ["Ritmo"] = "Rate", ["Cambios por segundo"] = "Changes per second",
 })
@@ -561,6 +623,20 @@ SWJ.Power = Hydra.Options.swjPower:Get()
 SWJ.Delay = Hydra.Options.swjDelay:Get()
 SWJ.AirMult = Hydra.Options.swjAir:Get()
 SWJ.OnlyMoving = Hydra.Options.swjOnlyMoving:Get()
+
+local InfiniteSlide
+InfiniteSlide = TabMove:Toggle({Id = "infiniteSlide", Title = "Infinite Slide", Desc = "El slide no frena mientras manten\195\169s agacharte", Icon = "\226\156\166", Keybind = true, Floating = true,
+    Callback = function(on)
+        if on and (Core.safeMode or not Core.hook()) then
+            Hydra:Notify("Infinite Slide: No disponible en este ejecutor")
+            task.defer(function() InfiniteSlide:Set(false, true) end)
+            return
+        end
+        IS.Enabled = on
+    end})
+InfiniteSlide:Slider({Id = "isBoost", Title = "Velocidad del slide", Desc = "M\195\161s alto = acelera m\195\161s r\195\161pido", Min = 1, Max = 150, Step = 1, Default = 8,
+    Callback = function(v) IS.Boost = v end})
+IS.Boost = Hydra.Options.isBoost:Get()
 
 local AutoCrouch
 AutoCrouch = TabMove:Toggle({Id = "autoCrouch", Title = "Auto Crouch", Desc = "Se agacha y se levanta solo", Icon = "\226\156\166", Keybind = true, Floating = true,
@@ -1214,3 +1290,1624 @@ ESP.Players.MaxDist, ESP.Players.Names, ESP.Players.Health = Hydra.Options.espDi
 ESP.Players.Arrows, ESP.Players.Tracers, ESP.Players.Outline = Hydra.Options.espArrows:Get(), Hydra.Options.espLines:Get(), Hydra.Options.espOutline:Get()
 ESP.Downed.MaxDist, ESP.Downed.Arrows, ESP.Downed.Outline = Hydra.Options.espDownDist:Get(), Hydra.Options.espDownArrows:Get(), Hydra.Options.espDownOutline:Get()
 Farm.Return = Hydra.Options.farmReturn:Get()
+
+-- ==================== PESTANA EXTRA: UNLOCK ALL ====================
+-- Desbloquea de forma VISUAL (solo en tu pantalla) emotes, cosmeticos, personajes, unusuals, perks, animaciones de
+-- cargar, nametags, boombox y skins de herramientas, parcheando los modulos del juego (Items.Registry, Inventory,
+-- Loadout, la rueda de emotes, etc.). Modulo completo de Unlock All (necesita que require() de los modulos reales).
+getgenv().HydraScriptText = function(es, en)
+    Hydra:AddTranslations({[es] = en})
+    return Hydra:T(es)
+end
+do
+local GENV = (type(getgenv) == "function" and getgenv()) or _G
+if GENV.HydraUnlockAll and GENV.HydraUnlockAll.Disable then
+    pcall(GENV.HydraUnlockAll.Disable)
+end
+
+GENV.HydraUnlockAll = (function()
+    local M = {}
+
+    local Players = game:GetService("Players")
+    local RS = game:GetService("ReplicatedStorage")
+    local StarterGui = game:GetService("StarterGui")
+    local LP = Players.LocalPlayer
+
+    local PREFIX = "[Hydra-UnlockAll]"
+    local LOG = {}
+    local function log(...)
+        local parts = {}
+        for i = 1, select("#", ...) do
+            parts[i] = tostring((select(i, ...)))
+        end
+        local line = PREFIX .. " " .. table.concat(parts, " ")
+        LOG[#LOG + 1] = line
+        if #LOG > 200 then
+            table.remove(LOG, 1)
+        end
+    end
+
+    local function path(root, ...)
+        local cur = root
+        for _, name in ipairs({ ... }) do
+            if not cur then
+                return nil
+            end
+            cur = cur:WaitForChild(name, 10)
+        end
+        return cur
+    end
+
+    local function req(label, ...)
+        local names = { ... }
+        local ok, res = pcall(function()
+            local inst = path(RS, table.unpack(names))
+            if not inst then
+                error("no se encontro la ruta")
+            end
+            return require(inst)
+        end)
+        if not ok then
+            log("FALLO cargando", label, "->", tostring(res))
+            return nil
+        end
+        return res
+    end
+
+    local active = false
+    local gen = 0
+    local patches = {}
+    local patchResults = {}
+
+    local fakeE = {}
+    local fakeC = {}
+    local pending = nil
+    local popupInst = nil
+    local warnedOverlay = false
+    local lastBuild = {}
+
+    local emoteOn, cosOn = false, false
+
+    local UA2 = {
+        fakeS = {},
+        SKINS = {},
+        SKINSET = {},
+        skinOn = false,
+        extraLocked = false,
+        slotsOn = false,
+        warnedNoBase = false,
+    }
+    local fakeS = UA2.fakeS
+
+    local Registry, Inventory, Loadout, PopupService, EmotePopup, EmoteClass, ItemSvc, RigClass, DataRegClass
+    local PackageMod, SlotsView
+    local EventSvc, ShopsSvc
+
+    local origGetOwned, origOwns, origIsEquipped, origGetFromSlot, origSlotTypeForSlot, origSetEquipped
+    local ItemSlotType
+
+    local ALL, ALLSET = {}, {}
+
+    local TYPE_NAMES = { "Cosmetic", "Character", "Unusual", "Perk", "CarryAnimation", "Nametag", "Boombox" }
+    local ENABLED, KNOWN = {}, {}
+    for _, n in ipairs(TYPE_NAMES) do
+        ENABLED[n] = true
+        KNOWN[n] = true
+    end
+
+    local INGAME = { Perk = true, Nametag = true, Boombox = true }
+    local function emptyByType()
+        local t = {}
+        for _, n in ipairs(TYPE_NAMES) do
+            t[n] = {}
+        end
+        return t
+    end
+    local BYTYPE = emptyByType()
+    local TYPE_OF = {}
+
+    M.Log = LOG
+    M.FakeEmotes = fakeE
+    M.FakeCosmetics = fakeC
+    M.FakeSkins = fakeS
+    M.LastBuild = lastBuild
+
+    local function writable(t)
+        local function probe()
+            return pcall(function()
+                t.__hydra_probe = nil
+            end)
+        end
+        if probe() then
+            return true
+        end
+        if type(setreadonly) == "function" then
+            pcall(setreadonly, t, false)
+        end
+        if probe() then
+            return true
+        end
+        if type(make_writeable) == "function" then
+            pcall(make_writeable, t)
+        end
+        return probe()
+    end
+
+    local function patch(label, tbl, key, build)
+        local orig = tbl[key]
+        if type(orig) ~= "function" then
+            log("PARCHE NO APLICADO (no existe la funcion):", label)
+            patchResults[#patchResults + 1] = { label = label, ok = false }
+            return false
+        end
+        if not writable(tbl) then
+            log("PARCHE NO APLICADO (tabla de solo lectura, falta setreadonly):", label)
+            patchResults[#patchResults + 1] = { label = label, ok = false }
+            return false
+        end
+        patches[#patches + 1] = { tbl = tbl, key = key, orig = orig }
+        tbl[key] = build(orig)
+        patchResults[#patchResults + 1] = { label = label, ok = true }
+        return true
+    end
+
+    local function patchBoth(label, key, build)
+        patch("useLoadout." .. label, Loadout, key, build)
+        patch("useInventory." .. label, Inventory, key, build)
+    end
+
+    local function slotIndex(slot)
+        return tonumber(string.match(tostring(slot), "^EmoteSlot_(%d+)$"))
+    end
+
+    local function realSlotId(idx)
+        local ok, id = pcall(origGetFromSlot, "EmoteSlot_" .. idx)
+        if ok and type(id) == "number" then
+            return id
+        end
+        return 0
+    end
+
+    local function owns(id)
+        local ok, res = pcall(origOwns, id)
+        return ok and res == true
+    end
+
+    local function pickBase()
+        local ok, owned = pcall(origGetOwned, "Emote")
+        if not ok or type(owned) ~= "table" then
+            return nil
+        end
+        local list = table.clone(owned)
+        table.sort(list)
+        for _, id in ipairs(list) do
+            if not origIsEquipped(id) then
+                return id
+            end
+        end
+        return nil
+    end
+
+    local function isExtraSlot(idx)
+        return UA2.slotsOn and UA2.extraLocked and type(idx) == "number" and idx > 6
+    end
+
+    local function baseEmoteId()
+        for i = 1, 6 do
+            local id = realSlotId(i)
+            if id ~= 0 then
+                return id
+            end
+        end
+        return nil
+    end
+
+    local function augmentEmotes(list)
+        if type(list) ~= "table" or not (UA2.slotsOn and UA2.extraLocked) then
+            return list
+        end
+        local out = table.clone(list)
+        local base = baseEmoteId()
+        for idx = 7, 12 do
+            if fakeE[idx] and base then
+                out[idx] = base
+            elseif realSlotId(idx) == 0 then
+                out[idx] = nil
+            end
+        end
+        if not base and next(fakeE) ~= nil and not UA2.warnedNoBase then
+            UA2.warnedNoBase = true
+            log("Para usar los slots 7-12 necesitas al menos un emote real equipado en los slots 1-6")
+        end
+        return out
+    end
+
+    local function getPopup()
+        if popupInst and popupInst.Frame then
+            return popupInst
+        end
+        if PopupService and type(PopupService.GetPopup) == "function" then
+            local ok, p = pcall(PopupService.GetPopup, PopupService, "Emote")
+            if ok and p then
+                popupInst = p
+                return p
+            end
+        end
+        return nil
+    end
+
+    local function wheelSlotFrame(popup, idx)
+        local wheel = popup.Frame:FindFirstChild(idx <= 6 and "Wheel" or "Wheel2")
+        return wheel and wheel:FindFirstChild("Emote" .. ((idx - 1) % 6 + 1))
+    end
+
+    local function applyOverlay(popup)
+        if not popup or not popup.Frame or type(popup.Emotes) ~= "table" then
+            return
+        end
+        for idx, fid in pairs(fakeE) do
+            if popup.Emotes[idx] then
+                local ok, err = pcall(function()
+                    local sf = wheelSlotFrame(popup, idx)
+                    local item = ItemSvc:GetItemFromID(fid)
+                    ItemSvc:ClearViewport(sf.ViewportFrame)
+                    ItemSvc:CreateViewport(item, sf.ViewportFrame)
+                    sf.TextLabel.Text = ItemSvc:GetName(item)
+                end)
+                if not ok and not warnedOverlay then
+                    warnedOverlay = true
+                    log("Aviso: no se pudo dibujar el visual en la rueda ->", tostring(err))
+                end
+            end
+        end
+    end
+
+    local function refreshWheel()
+        local p = getPopup()
+        if not p or type(p.Emotes) ~= "table" then
+            return
+        end
+        pcall(origSetEquipped, p, augmentEmotes(p.Emotes))
+        applyOverlay(p)
+    end
+
+    local function isLocalEmote(self)
+        local char = self.Character
+        local lc = LP.Character
+        if not char or not lc then
+            return false
+        end
+        if char == lc then
+            return true
+        end
+        local a, b = char:GetAttribute("Tag"), lc:GetAttribute("Tag")
+        return a ~= nil and a == b
+    end
+
+    local function resolveFake(self)
+        local mod = self.EmoteModule
+        local modId = mod and mod:GetAttribute("ID")
+        if not modId then
+            return nil
+        end
+        if pending and tick() - pending.t < 5 then
+            local fid = fakeE[pending.slot]
+            if fid and (realSlotId(pending.slot) == modId or (isExtraSlot(pending.slot) and pending.base == modId)) then
+                pending = nil
+                return fid
+            end
+        end
+        for idx = 1, 12 do
+            local fid = fakeE[idx]
+            if fid and realSlotId(idx) == modId then
+                return fid
+            end
+        end
+        return nil
+    end
+
+    local function swapTo(fid)
+        if type(firesignal) ~= "function" then
+            log("Tu ejecutor no tiene firesignal: no se puede cambiar el emote local")
+            return
+        end
+        local char = LP.Character
+        local tag = char and char:GetAttribute("Tag")
+        if not tag then
+            log("No se encontro el Tag del personaje; no se cambia el emote")
+            return
+        end
+        local ok, err = pcall(function()
+            local tagBuf = buffer.create(2)
+            buffer.writeu16(tagBuf, 0, tag)
+            firesignal(RS.Events.UpdateCharacterDataRegistry.OnClientEvent, {
+                buffer.fromstring("\24\1"),
+                fid,
+                tagBuf,
+            })
+        end)
+        if not ok then
+            log("Fallo el cambio local de emote ->", tostring(err))
+        end
+    end
+
+    local function slotType(slot)
+        if type(slot) ~= "string" or type(origSlotTypeForSlot) ~= "function" then
+            return nil
+        end
+        local ok, st = pcall(origSlotTypeForSlot, slot)
+        if ok and KNOWN[st] then
+            return st
+        end
+        return nil
+    end
+
+    local function collectEmoteIds()
+        local raw, seen = {}, {}
+        local items = RS:FindFirstChild("Items")
+        local function walk(parent)
+            for _, child in ipairs(parent:GetChildren()) do
+                if child:IsA("Folder") then
+                    if child.Name == "Emotes" then
+                        for _, e in ipairs(child:GetChildren()) do
+                            if e:IsA("ModuleScript") then
+                                local id = e:GetAttribute("ID")
+                                if type(id) == "number" and not seen[id] then
+                                    seen[id] = true
+                                    raw[#raw + 1] = id
+                                end
+                            end
+                        end
+                    else
+                        walk(child)
+                    end
+                end
+            end
+        end
+        if items then
+            walk(items)
+        end
+
+        local filtered = {}
+        for _, id in ipairs(raw) do
+            local okSlot, st = pcall(ItemSlotType, id)
+            local okReg, entry = pcall(Registry.GetById, id)
+            if okSlot and st == "Emote" and okReg and entry and entry.Module then
+                filtered[#filtered + 1] = id
+            end
+        end
+        if #filtered == 0 and #raw > 0 then
+            log("Aviso: el filtro por slot 'Emote' dejo 0; se usa la lista sin filtrar (", #raw, ")")
+            filtered = raw
+        end
+        table.sort(filtered)
+        return filtered, #raw
+    end
+
+    local function collectCosmetics()
+        local okAll, all = pcall(Registry.GetAll)
+        if not okAll or type(all) ~= "table" then
+            return nil
+        end
+        local bytype = emptyByType()
+        local typeOf = {}
+        local n = 0
+        for id in pairs(all) do
+            n = n + 1
+            if n % 150 == 0 then
+                task.wait()
+            end
+            if type(id) == "number" then
+                local ok, st = pcall(ItemSlotType, id)
+                if ok and KNOWN[st] then
+                    local list = bytype[st]
+                    list[#list + 1] = id
+                    typeOf[id] = st
+                end
+            end
+        end
+        for _, list in pairs(bytype) do
+            table.sort(list)
+        end
+        return bytype, typeOf, n
+    end
+
+    local function collectSkins()
+        local okAll, all = pcall(Registry.GetAll)
+        if not okAll or type(all) ~= "table" then
+            return {}, {}
+        end
+        local list, set, n = {}, {}, 0
+        for id in pairs(all) do
+            n = n + 1
+            if n % 150 == 0 then
+                task.wait()
+            end
+            if type(id) == "number" then
+                local ok, isSkin = pcall(function()
+                    local entry = Registry.GetById(id)
+                    local original = entry and entry.Module and entry.Module:FindFirstChild("Original")
+                    return original ~= nil and original:IsA("ObjectValue") and original.Value ~= nil
+                end)
+                if ok and isSkin then
+                    list[#list + 1] = id
+                    set[id] = true
+                end
+            end
+        end
+        table.sort(list)
+        return list, set
+    end
+
+    local function substitutePerks(value)
+        if type(value) ~= "table" or not (INGAME.Perk and ENABLED.Perk) then
+            return value
+        end
+        local removed, any = {}, false
+        for slot in pairs(fakeC) do
+            if slotType(slot) == "Perk" then
+                any = true
+                local okR, rid = pcall(origGetFromSlot, slot)
+                if okR and type(rid) == "number" and rid ~= 0 then
+                    removed[rid] = true
+                end
+            end
+        end
+        if not any then
+            return value
+        end
+        local out, seen = {}, {}
+        for _, id in ipairs(value) do
+            if not removed[id] then
+                out[#out + 1] = id
+                seen[id] = true
+            end
+        end
+        for slot, fid in pairs(fakeC) do
+            if slotType(slot) == "Perk" and not seen[fid] then
+                out[#out + 1] = fid
+                seen[fid] = true
+            end
+        end
+        return out
+    end
+
+    local function substituteSkins(value)
+        if not UA2.skinOn or next(fakeS) == nil then
+            return value
+        end
+        if type(value) ~= "table" then
+            value = {}
+        end
+        local removed = {}
+        for item in pairs(fakeS) do
+            local okO, realOrig = pcall(function() return UA2.origGetSkin(item) end)
+            if okO and type(realOrig) == "number" then
+                removed[realOrig] = true
+            end
+        end
+        local out, seen = {}, {}
+        for _, id in ipairs(value) do
+            if not removed[id] then
+                out[#out + 1] = id
+                seen[id] = true
+            end
+        end
+        for _, sid in pairs(fakeS) do
+            if not seen[sid] then
+                out[#out + 1] = sid
+                seen[sid] = true
+            end
+        end
+        return out
+    end
+
+    local function substituteNametag(value)
+        local fid = fakeC["NametagSlot"]
+        if type(fid) == "number" and INGAME.Nametag and ENABLED.Nametag then
+            return fid
+        end
+        return value
+    end
+
+    local function applyPatches()
+
+        patch("useInventory.GetOwnedBySlotType", Inventory, "GetOwnedBySlotType", function(orig)
+            return function(st, ...)
+                local list = orig(st, ...)
+                if type(list) ~= "table" then
+                    return list
+                end
+                local extra
+                if st == "Emote" then
+                    if not emoteOn then
+                        return list
+                    end
+                    extra = ALL
+                elseif cosOn and ENABLED[st] then
+                    extra = BYTYPE[st]
+                else
+                    return list
+                end
+                local have = {}
+                for _, id in ipairs(list) do
+                    have[id] = true
+                end
+                local out = table.clone(list)
+                for _, id in ipairs(extra) do
+                    if not have[id] then
+                        out[#out + 1] = id
+                    end
+                end
+                return out
+            end
+        end)
+
+        patchBoth("Equip", "Equip", function(orig)
+            return function(slot, id, ...)
+                local idx = emoteOn and slotIndex(slot) or nil
+                if idx and isExtraSlot(idx) then
+
+                    if type(id) == "number" and id ~= 0 then
+                        fakeE[idx] = id
+                        log("Slot extra", idx, "-> emote visual", id)
+                    else
+                        fakeE[idx] = nil
+                    end
+                    refreshWheel()
+                    pcall(function() Loadout.Changed:Fire() end)
+                    return
+                end
+                if idx then
+                    if type(id) == "number" and id ~= 0 then
+                        if ALLSET[id] and not owns(id) then
+                            if realSlotId(idx) == 0 then
+                                local base = pickBase()
+                                if not base then
+                                    log("No tienes ningun emote real para usar de base en el slot", idx)
+                                    return
+                                end
+                                log("Slot", idx, "vacio: se equipa el emote real base", base)
+                                orig(slot, base)
+                            end
+                            fakeE[idx] = id
+                            log("Slot", idx, "-> emote visual", id)
+                            refreshWheel()
+                            return
+                        end
+                        local had = fakeE[idx] ~= nil
+                        fakeE[idx] = nil
+                        local r = orig(slot, id, ...)
+                        if had then
+                            refreshWheel()
+                        end
+                        return r
+                    end
+                    if id == nil or id == 0 then
+                        fakeE[idx] = nil
+                    end
+                    return orig(slot, id, ...)
+                end
+
+                local st = cosOn and slotType(slot) or nil
+                if st and ENABLED[st] then
+                    if type(id) == "number" and id ~= 0 then
+                        if TYPE_OF[id] == st and not owns(id) then
+                            fakeC[slot] = id
+                            log("Slot", slot, "-> visual", id)
+                            return
+                        end
+                        fakeC[slot] = nil
+                        return orig(slot, id, ...)
+                    end
+                    if (id == nil or id == 0) and fakeC[slot] ~= nil then
+                        fakeC[slot] = nil
+                        log("Slot", slot, "-> visual quitado")
+                        return
+                    end
+                end
+                return orig(slot, id, ...)
+            end
+        end)
+
+        patchBoth("Unequip", "Unequip", function(orig)
+            return function(slot, ...)
+                if cosOn and fakeC[slot] ~= nil then
+                    fakeC[slot] = nil
+                    log("Slot", slot, "-> visual quitado")
+                    return
+                end
+                local idx = emoteOn and slotIndex(slot) or nil
+                if idx and isExtraSlot(idx) then
+                    fakeE[idx] = nil
+                    refreshWheel()
+                    pcall(function() Loadout.Changed:Fire() end)
+                    return
+                end
+                local had = idx and fakeE[idx] ~= nil
+                if idx then
+                    fakeE[idx] = nil
+                end
+                local r = orig(slot, ...)
+                if had then
+                    refreshWheel()
+                end
+                return r
+            end
+        end)
+
+        local function buildEquippedMap(orig)
+            return function(...)
+                local real = orig(...)
+                if type(real) ~= "table" or (next(fakeE) == nil and next(fakeC) == nil) then
+                    return real
+                end
+                local out = table.clone(real)
+                for idx, fid in pairs(fakeE) do
+                    local name = "EmoteSlot_" .. idx
+                    if out[name] or isExtraSlot(idx) then
+                        out[name] = fid
+                    end
+                end
+                for slot, fid in pairs(fakeC) do
+                    out[slot] = fid
+                end
+                return table.freeze(out)
+            end
+        end
+        patch("useLoadout.GetAll", Loadout, "GetAll", buildEquippedMap)
+        patch("useInventory.GetLoadout", Inventory, "GetLoadout", buildEquippedMap)
+
+        patchBoth("IsEquipped", "IsEquipped", function(orig)
+            return function(id)
+                local eq, s = orig(id)
+                if eq then
+                    return eq, s
+                end
+                for idx, fid in pairs(fakeE) do
+                    if fid == id then
+                        return true, "EmoteSlot_" .. idx
+                    end
+                end
+                for slot, fid in pairs(fakeC) do
+                    if fid == id then
+                        return true, slot
+                    end
+                end
+                return false, nil
+            end
+        end)
+
+        if emoteOn then
+
+            patch("EmotePopup.SetEquipped", EmotePopup, "SetEquipped", function(orig)
+                return function(self, list, ...)
+                    local r = orig(self, augmentEmotes(list), ...)
+                    popupInst = self
+                    applyOverlay(self)
+                    return r
+                end
+            end)
+
+            patch("EmotePopup.Show", EmotePopup, "Show", function(orig)
+                return function(self, ...)
+                    local r = orig(self, ...)
+                    popupInst = self
+                    applyOverlay(self)
+                    return r
+                end
+            end)
+
+            patch("EmotePopup.KeyActivated", EmotePopup, "KeyActivated", function(orig)
+                return function(self, slot, ...)
+                    if type(slot) == "number" then
+                        pending = { slot = slot, t = tick(), base = type(self.Emotes) == "table" and self.Emotes[slot] or nil }
+                    end
+                    return orig(self, slot, ...)
+                end
+            end)
+
+            patch("Emote.Activate", EmoteClass, "Activate", function(orig)
+                return function(self, preview, p3)
+                    local fid = nil
+                    if not preview then
+                        pcall(function()
+                            if isLocalEmote(self) then
+                                fid = resolveFake(self)
+                            end
+                        end)
+                    end
+                    if fid then
+                        task.defer(swapTo, fid)
+                    end
+                    return orig(self, preview, p3)
+                end
+            end)
+        end
+
+        if UA2.slotsOn and PackageMod then
+            patch("UserOwnsPackage.Owns (MoreEmotes)", PackageMod, "Owns", function(orig)
+                return function(player, package, ...)
+                    if package == "MoreEmotes" and player == LP and UA2.slotsOn then
+                        return true
+                    end
+                    return orig(player, package, ...)
+                end
+            end)
+        end
+
+        local boomboxOn = cosOn and ENABLED.Boombox and #BYTYPE.Boombox > 0
+        if SlotsView and (UA2.slotsOn or boomboxOn) then
+            patch("Inventario.Slots.SetHeader (12 emotes + boombox)", SlotsView, "SetHeader", function(orig)
+                return function(self, ...)
+                    if UA2.slotsOn then
+                        self.MoreEmotes = true
+                    end
+                    if cosOn and ENABLED.Boombox and #BYTYPE.Boombox > 0 then
+                        self.OwnsRelics = true
+                    end
+                    return orig(self, ...)
+                end
+            end)
+        end
+
+        if boomboxOn then
+            patchBoth("GetEquipped (boombox)", "GetEquipped", function(orig)
+                return function(slot, ...)
+                    if slot == "BoomboxSlot" and fakeC.BoomboxSlot ~= nil then
+                        return fakeC.BoomboxSlot
+                    end
+                    return orig(slot, ...)
+                end
+            end)
+        end
+
+        if UA2.skinOn then
+            patch("useInventory.OwnedIds (skins)", Inventory, "OwnedIds", function(orig)
+                return function(...)
+                    local list = orig(...)
+                    if not UA2.skinOn or type(list) ~= "table" then
+                        return list
+                    end
+                    local have = {}
+                    for _, id in ipairs(list) do
+                        have[id] = true
+                    end
+                    local out = table.clone(list)
+                    for _, id in ipairs(UA2.SKINS) do
+                        if not have[id] then
+                            out[#out + 1] = id
+                        end
+                    end
+                    table.sort(out)
+                    return out
+                end
+            end)
+            patch("useInventory.GetSkin", Inventory, "GetSkin", function(orig)
+                return function(item, ...)
+                    if UA2.skinOn and fakeS[item] ~= nil then
+                        return fakeS[item]
+                    end
+                    return orig(item, ...)
+                end
+            end)
+
+            if DataRegClass then
+                patch("DataRegistry.Get (skins de herramientas)", DataRegClass, "Get", function(orig)
+                    return function(self, term, ...)
+                        local value = orig(self, term, ...)
+                        if term == "ToolSkins" and UA2.skinOn and next(fakeS) ~= nil then
+                            local okL, isLocal = pcall(function()
+                                return self.Parent ~= nil and self.Parent.Local == true
+                            end)
+                            if okL and isLocal then
+                                local okS, res = pcall(substituteSkins, value)
+                                if okS and res ~= nil then
+                                    return res
+                                end
+                            end
+                        end
+                        return value
+                    end
+                end)
+            end
+            patch("useInventory.SetSkin", Inventory, "SetSkin", function(orig)
+                return function(item, skin, ...)
+                    if UA2.skinOn then
+                        if type(skin) == "number" and skin ~= 0 and UA2.SKINSET[skin] and not owns(skin) then
+                            fakeS[item] = skin
+                            log("Skin visual:", item, "->", skin)
+                            pcall(function() Inventory.Changed:Fire() end)
+                            return
+                        end
+                        if fakeS[item] ~= nil then
+                            fakeS[item] = nil
+                            pcall(function() Inventory.Changed:Fire() end)
+                        end
+                    end
+                    return orig(item, skin, ...)
+                end
+            end)
+        end
+
+        if cosOn then
+
+            if RigClass then
+                patch("Rig.BuildRig (partida)", RigClass, "BuildRig", function(orig)
+                    return function(self, ...)
+                        if not self.Built
+                            and type(self.Cosmetics) == "table"
+                            and self.RigTerm and self.Actions and self.ToolSkins and self.Boombox
+                            and next(fakeC) ~= nil
+                        then
+                            local isLocal = false
+                            pcall(function()
+                                isLocal = self.Parent ~= nil and self.Parent.Local == true
+                            end)
+                            if isLocal then
+                                local ok, err = pcall(function()
+                                    local real = self.Cosmetics
+                                    local removed = {}
+                                    for slot in pairs(fakeC) do
+
+                                        if slot ~= "BoomboxSlot" then
+                                            local okR, rid = pcall(origGetFromSlot, slot)
+                                            if okR and type(rid) == "number" and rid ~= 0 then
+                                                removed[rid] = true
+                                            end
+                                        end
+                                    end
+                                    local out, seen = {}, {}
+                                    for _, id in ipairs(real) do
+                                        if not removed[id] then
+                                            out[#out + 1] = id
+                                            seen[id] = true
+                                        end
+                                    end
+                                    for slot, fid in pairs(fakeC) do
+                                        if slot ~= "BoomboxSlot" and not seen[fid] then
+                                            out[#out + 1] = fid
+                                            seen[fid] = true
+                                        end
+                                    end
+
+                                    local bid = fakeC.BoomboxSlot
+                                    if type(bid) == "number" and INGAME.Boombox and ENABLED.Boombox then
+                                        self.Boombox = bid
+                                    end
+                                    table.clear(lastBuild)
+                                    lastBuild.Real = table.clone(real)
+                                    lastBuild.Fake = table.clone(fakeC)
+                                    lastBuild.Final = table.clone(out)
+                                    self.Cosmetics = out
+                                    log(
+                                        "BuildRig local: real = {" .. table.concat(real, ",") .. "}",
+                                        "| final = {" .. table.concat(out, ",") .. "}"
+                                    )
+                                end)
+                                if not ok then
+                                    log("Fallo al cambiar Cosmetics en BuildRig ->", tostring(err))
+                                end
+                            end
+                        end
+                        return orig(self, ...)
+                    end
+                end)
+            else
+                log("PARCHE NO APLICADO (no se pudo cargar Objects.Game.Character.Rig): cosmeticos en partida no funcionan")
+                patchResults[#patchResults + 1] = { label = "Rig.BuildRig (partida)", ok = false }
+            end
+
+            if DataRegClass then
+                patch("DataRegistry.SetTerm (ventajas/etiqueta)", DataRegClass, "SetTerm", function(orig)
+                    return function(self, term, value, ...)
+                        if (term == "Perks" or term == "Nametag" or term == "Boombox") and next(fakeC) ~= nil then
+                            local ok, res = pcall(function()
+                                if self.Parent == nil or self.Parent.Local ~= true then
+                                    return value
+                                end
+                                if term == "Perks" then
+                                    return substitutePerks(value)
+                                end
+                                if term == "Boombox" then
+                                    local fid = fakeC.BoomboxSlot
+                                    if type(fid) == "number" and INGAME.Boombox and ENABLED.Boombox then
+                                        return fid
+                                    end
+                                    return value
+                                end
+                                return substituteNametag(value)
+                            end)
+                            if ok and res ~= nil and res ~= value then
+                                log("En partida:", term, "->", type(res) == "table" and ("{" .. table.concat(res, ",") .. "}") or tostring(res))
+                                value = res
+                            end
+                        end
+                        return orig(self, term, value, ...)
+                    end
+                end)
+            else
+                log("PARCHE NO APLICADO (no se pudo cargar Objects.Game.Character.DataRegistry): ventajas/etiqueta en partida no funcionan")
+                patchResults[#patchResults + 1] = { label = "DataRegistry.SetTerm (ventajas/etiqueta)", ok = false }
+            end
+        end
+    end
+
+    local SHOP_MODE = "B"
+    local origTierProgress
+
+    local lastShopNotify = 0
+    local function shopNotify(es, en)
+        if os.clock() - lastShopNotify < 4 then
+            return
+        end
+        lastShopNotify = os.clock()
+        pcall(function()
+            local tr = (type(getgenv) == "function" and getgenv().HydraScriptText) or nil
+            StarterGui:SetCore("SendNotification", {
+                Title = tr and tr("Tienda de evento", "Event shop") or "Tienda de evento",
+                Text = tr and tr(es, en) or es,
+                Duration = 4,
+            })
+        end)
+    end
+
+    local function applyShopPatches()
+        if not (EventSvc and ShopsSvc) then
+            log("Tienda de evento: falta UserData.Event o UserData.Shops, parches omitidos")
+            return
+        end
+        origTierProgress = EventSvc.GetTierProgress
+
+        local okBuy = patch("useShops.Purchase (no manda compras de tiers bloqueados)", ShopsSvc, "Purchase", function(orig)
+            return function(id, ...)
+                local n = tonumber(id)
+                if n and type(origTierProgress) == "function" then
+                    local ok, tiers = pcall(origTierProgress)
+                    if ok and type(tiers) == "table" then
+                        for _, t in ipairs(tiers) do
+                            if t.status == "Locked" then
+                                for _, it in ipairs(t.items or {}) do
+                                    if it.itemId == n then
+                                        log("Tienda de evento: item", n, "esta en un tier bloqueado de verdad -> no se manda la compra")
+                                        shopNotify("Solo visual: ese tier sigue bloqueado y no se puede comprar", "Visual only: that tier is still locked and cannot be bought")
+                                        return false
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+                return orig(id, ...)
+            end
+        end)
+        if not okBuy then
+            log("Tienda de evento: no se aplico el bloqueo de compra, asi que tampoco se cambia lo que se muestra")
+            return
+        end
+
+        patch("useEvent.GetTiers (candado visual)", EventSvc, "GetTiers", function(orig)
+            return function(...)
+                local real = orig(...)
+                if type(real) ~= "table" then
+                    return real
+                end
+                local out = {}
+                for i, t in ipairs(real) do
+                    local c = t
+                    if type(t) == "table" and t.State == "Locked" then
+                        if SHOP_MODE == "B" then
+                            c = table.clone(t)
+                            c.State = "Unlocked"
+                            c.IsTimeOpen = true
+                            c.IsWaitingOnTimer = false
+                            c.ItemsMet = true
+                            c.UnlockProgress = nil
+                        elseif t.IsWaitingOnTimer then
+                            c = table.clone(t)
+                            c.IsTimeOpen = true
+                            c.IsWaitingOnTimer = false
+                            if t.ItemsMet then
+                                c.State = "Unlocked"
+                            end
+                        end
+                    end
+                    out[i] = c
+                end
+                return out
+            end
+        end)
+    end
+
+    function M.Disable()
+        gen = gen + 1
+        if not active then
+            return
+        end
+        for i = #patches, 1, -1 do
+            local p = patches[i]
+            pcall(function()
+                p.tbl[p.key] = p.orig
+            end)
+        end
+        patches = {}
+        table.clear(fakeE)
+        table.clear(fakeC)
+        table.clear(fakeS)
+        table.clear(lastBuild)
+        pending = nil
+        emoteOn, cosOn = false, false
+        UA2.skinOn, UA2.slotsOn = false, false
+        pcall(function() Inventory.Changed:Fire() end)
+        pcall(function() Loadout.Changed:Fire() end)
+        active = false
+        refreshWheel()
+        log("Descargado: todo restaurado")
+    end
+
+    local function enableImpl(myGen)
+
+        for _, name in ipairs({}) do
+            local ok, t = pcall(function()
+                return GENV[name]
+            end)
+            if ok and type(t) == "table" and type(t.Unload) == "function" then
+                pcall(t.Unload)
+                log("Se descargo el script de prueba suelto:", name)
+            end
+        end
+
+        Registry = req("Items.Registry", "Items", "Registry")
+        Inventory = req("useInventory", "Client", "Services", "UserData", "Inventory")
+        Loadout = req("useLoadout", "Client", "Services", "UserData", "Inventory", "Loadout")
+        if not (Registry and Inventory and Loadout) then
+            log("ABORTADO: falta al menos un modulo necesario. No se aplico ningun parche.")
+            return
+        end
+
+        ItemSlotType = Inventory.GetItemSlotType
+        do
+            local matched, checked, emoteBad = 0, 0, 0
+            local okAll, equipped = pcall(Loadout.GetAll)
+            if type(ItemSlotType) == "function" and okAll and type(equipped) == "table" then
+                for slot, id in pairs(equipped) do
+                    if type(id) == "number" and id ~= 0 then
+                        local okI, got = pcall(ItemSlotType, id)
+                        local okS, want = pcall(Loadout.GetSlotType, slot)
+                        if okI and okS and want ~= nil then
+                            checked = checked + 1
+                            if got == want then
+                                matched = matched + 1
+                            elseif want == "Emote" then
+                                emoteBad = emoteBad + 1
+                            end
+                        end
+                    end
+                end
+            end
+            if matched == 0 or emoteBad > 0 then
+                log("ABORTADO: GetItemSlotType no coincide con tu loadout (coinciden " .. matched .. " de " .. checked .. ", emotes mal: " .. emoteBad .. "). No se aplico ningun parche.")
+                return
+            end
+            log("GetItemSlotType verificado contra tu loadout:", matched, "de", checked, "slots")
+        end
+        RigClass = req("Objects.Game.Character.Rig", "Objects", "Game", "Character", "Rig")
+        DataRegClass = req("Objects.Game.Character.DataRegistry", "Objects", "Game", "Character", "DataRegistry")
+        PopupService = req("PopupService", "Services", "UI", "PopupService")
+        EmotePopup = req("PopupService.Types.Emote", "Services", "UI", "PopupService", "Types", "Emote")
+        EmoteClass = req("Objects.Items.Emote", "Objects", "Items", "Emote")
+        ItemSvc = req("ClientItemService", "Services", "Items", "ClientItemService")
+        PackageMod = req("UserOwnsPackage", "Shared", "Marketplace", "UserOwnsPackage")
+        SlotsView = req("Menu.Inventory.Slots", "Objects", "Menu", "Menu", "Views", "Inventory", "Views", "Slots")
+        EventSvc = req("useEvent", "Client", "Services", "UserData", "Event")
+        ShopsSvc = req("useShops", "Client", "Services", "UserData", "Shops")
+        local emoteMods = (EmotePopup and EmoteClass and ItemSvc) and true or false
+        if not emoteMods then
+            log("Aviso: faltan modulos de emotes; Unlock All se aplica solo a cosmeticos/personajes/auras")
+        end
+
+        local newAll, newAllSet, rawCount = {}, {}, 0
+        if emoteMods then
+            newAll, rawCount = collectEmoteIds()
+            for _, id in ipairs(newAll) do
+                newAllSet[id] = true
+            end
+            log("Emotes encontrados:", rawCount, "| validos:", #newAll)
+        end
+
+        local newBy, newTypeOf, regCount = collectCosmetics()
+        local newSkins, newSkinSet = collectSkins()
+
+        local extraLocked = false
+        if PackageMod then
+            local okOwn, owned = pcall(PackageMod.Owns, LP, "MoreEmotes")
+            extraLocked = not (okOwn and owned == true)
+        end
+        if myGen ~= gen then
+            return
+        end
+        if active then
+            return
+        end
+        if not newBy then
+            log("Aviso: Registry.GetAll no devolvio una tabla; cosmeticos/personajes/auras desactivados")
+            newBy = emptyByType()
+            newTypeOf = {}
+            regCount = 0
+        end
+        local cosTotal = 0
+        local counts = {}
+        for _, n in ipairs(TYPE_NAMES) do
+            cosTotal = cosTotal + #newBy[n]
+            counts[#counts + 1] = n .. ": " .. #newBy[n]
+        end
+        log("Items en Registry:", regCount, "|", table.concat(counts, " | "))
+
+        log("Skins de herramientas:", #newSkins, "| Emote slots 7-12:", extraLocked and "bloqueados (se desbloquean visuales)" or "ya comprados")
+
+        if #newAll == 0 and cosTotal == 0 and #newSkins == 0 then
+            log("ABORTADO: no se encontro ningun emote ni cosmetico. No se aplico ningun parche.")
+            return
+        end
+
+        ALL, ALLSET = newAll, newAllSet
+        BYTYPE, TYPE_OF = newBy, newTypeOf
+        emoteOn = emoteMods and #newAll > 0
+        cosOn = cosTotal > 0
+        UA2.SKINS, UA2.SKINSET = newSkins, newSkinSet
+        UA2.skinItem = nil
+        UA2.skinOn = #newSkins > 0
+        UA2.extraLocked = extraLocked
+        UA2.slotsOn = emoteOn and extraLocked
+        UA2.warnedNoBase = false
+        table.clear(fakeS)
+        patches, patchResults = {}, {}
+        table.clear(fakeE)
+        table.clear(fakeC)
+        pending = nil
+        popupInst = nil
+        warnedOverlay = false
+
+        origGetOwned = Inventory.GetOwnedBySlotType
+        origOwns = Inventory.Owns
+        origIsEquipped = Loadout.IsEquipped
+        origGetFromSlot = Loadout.GetEquipped
+        origSlotTypeForSlot = Loadout.GetSlotType
+        origSetEquipped = EmotePopup and EmotePopup.SetEquipped or nil
+        UA2.origGetSkin = Inventory.GetSkin
+
+        applyPatches()
+        applyShopPatches()
+        active = true
+
+        if UA2.skinOn then
+            task.spawn(function()
+                local deploySvc = req("DeployableService", "Services", "Items", "DeployableService")
+                if not deploySvc or not active or myGen ~= gen or not UA2.skinOn then
+                    return
+                end
+                patch("DeployableService.Build (skins de colocables)", deploySvc, "Build", function(orig)
+                    return function(self, model, ...)
+                        if UA2.skinOn and next(fakeS) ~= nil and typeof(model) == "Instance" then
+                            pcall(function()
+                                local owner = model:GetAttribute("Owner")
+                                local mine = owner ~= nil and (owner == LP.Name or owner == LP.DisplayName or owner == LP.UserId)
+                                if not UA2.loggedOwner then
+                                    UA2.loggedOwner = true
+                                    log("Colocable", model.Name, "Owner =", tostring(owner), mine and "(tuyo)" or "(de otro)")
+                                end
+                                if not mine then
+                                    return
+                                end
+                                for item, sid in pairs(fakeS) do
+                                    local entry = Registry.GetById(item)
+                                    if entry and entry.Module and entry.Module.Name == model.Name then
+                                        model:SetAttribute("Skin", sid)
+                                        log("Colocable", model.Name, "-> skin visual", sid)
+                                    end
+                                end
+                            end)
+                        end
+                        return orig(self, model, ...)
+                    end
+                end)
+            end)
+        end
+        pcall(function() Inventory.Changed:Fire() end)
+        pcall(function() Loadout.Changed:Fire() end)
+        refreshWheel()
+
+        local okCount = 0
+        for _, r in ipairs(patchResults) do
+            if r.ok then
+                okCount = okCount + 1
+            end
+        end
+        log("Listo:", okCount .. "/" .. #patchResults, "parches aplicados")
+        if okCount < #patchResults then
+            log("Algun parche fallo")
+        end
+        pcall(function()
+            StarterGui:SetCore("SendNotification", {
+                Title = "Unlock All",
+                Text = okCount .. "/" .. #patchResults .. ((type(getgenv) == "function" and getgenv().HydraScriptText) and getgenv().HydraScriptText(" parches aplicados", " patches applied") or " parches aplicados"),
+                Duration = 5,
+            })
+        end)
+    end
+
+    function M.Enable()
+        if active then
+            return
+        end
+        gen = gen + 1
+        local myGen = gen
+        task.spawn(function()
+            local ok, err = pcall(enableImpl, myGen)
+            if not ok then
+                log("FALLO Enable ->", tostring(err))
+            end
+        end)
+    end
+
+    function M.IsEnabled()
+        return active
+    end
+
+    function M.Status()
+        log("---- ESTADO ---- activo:", tostring(active), "| emotes:", tostring(emoteOn), "| cosmeticos:", tostring(cosOn))
+        for _, r in ipairs(patchResults) do
+            log(r.ok and "OK     " or "FALLO  ", r.label)
+        end
+        for st in pairs(KNOWN) do
+            log("Tipo", st, ENABLED[st] and "activo" or "desactivado", "| items:", #BYTYPE[st])
+        end
+        local any = false
+        for idx = 1, 12 do
+            if fakeE[idx] then
+                any = true
+                log("Emote slot", idx, "real:", realSlotId(idx), "| visual:", fakeE[idx])
+            end
+        end
+        for slot, fid in pairs(fakeC) do
+            any = true
+            local okReal, real = pcall(Loadout.GetEquipped, slot)
+            log("Slot", slot, "real:", okReal and real or "?", "| visual:", fid)
+        end
+        for item, sid in pairs(fakeS) do
+            any = true
+            log("Skin de", item, "-> visual", sid)
+        end
+        log("Skins disponibles:", #UA2.SKINS, "| slots 7-12:", UA2.slotsOn and "visuales" or (UA2.extraLocked and "bloqueados" or "comprados"))
+        if not any then
+            log("Sin slots visuales activos")
+        end
+    end
+
+    function M.SetType(name, state)
+        if not KNOWN[name] then
+            log("Tipo desconocido:", tostring(name), "(usa " .. table.concat(TYPE_NAMES, ", ") .. ")")
+            return
+        end
+        ENABLED[name] = state and true or false
+        if not ENABLED[name] then
+            for slot in pairs(fakeC) do
+                if slotType(slot) == name then
+                    fakeC[slot] = nil
+                end
+            end
+        end
+        log("Tipo", name, ENABLED[name] and "activado" or "desactivado", "(se aplica la proxima vez que abras el selector)")
+    end
+
+    function M.GetBoomboxSkins()
+        local out, seen = {}, {}
+        for _, id in ipairs(BYTYPE.Boombox or {}) do
+            local name = tostring(id)
+            pcall(function()
+                local entry = Registry.GetById(id)
+                local ok, info = pcall(require, entry.Module)
+                name = (ok and type(info) == "table" and info.AppearanceInfo and info.AppearanceInfo.Name) or entry.Module.Name
+            end)
+            seen[id] = true
+            out[#out + 1] = { id = id, name = name, ugc = false }
+        end
+        pcall(function()
+            for _, tagged in ipairs(game:GetService("CollectionService"):GetTagged("RelicsUGCSkin")) do
+                local id = tagged:GetAttribute("ID")
+                if type(id) == "number" and not seen[id] then
+                    seen[id] = true
+                    local display = tagged:GetAttribute("DisplayName")
+                    out[#out + 1] = { id = id, name = type(display) == "string" and display or tagged.Name, ugc = true }
+                end
+            end
+        end)
+        return out
+    end
+
+    function M.GetBoombox()
+        return fakeC.BoomboxSlot
+    end
+
+    function M.SetBoombox(id)
+        if not active then
+            log("Activa Unlock All primero")
+            return false
+        end
+        fakeC.BoomboxSlot = type(id) == "number" and id or nil
+        log("Boombox visual ->", tostring(fakeC.BoomboxSlot))
+        pcall(function() Loadout.Changed:Fire() end)
+        return true
+    end
+
+    function M.Snapshot()
+        local snap = { emotes = {}, cosmetics = {}, skins = {} }
+        for idx, fid in pairs(fakeE) do snap.emotes[tostring(idx)] = fid end
+        for slot, fid in pairs(fakeC) do snap.cosmetics[slot] = fid end
+        for item, sid in pairs(fakeS) do snap.skins[tostring(item)] = sid end
+        return snap
+    end
+
+    function M.ApplySnapshot(snap)
+        if not active or type(snap) ~= "table" then
+            return false
+        end
+        table.clear(fakeE)
+        table.clear(fakeC)
+        table.clear(fakeS)
+        local skipped = 0
+        for idx, fid in pairs(snap.emotes or {}) do
+            local n = tonumber(idx)
+            if not (n and n >= 1 and n <= 12 and ALLSET[fid]) or (n > 6 and UA2.extraLocked and not UA2.slotsOn) then
+                skipped += 1
+            elseif n <= 6 and realSlotId(n) == 0 then
+
+                local okE = pcall(Loadout.Equip, "EmoteSlot_" .. n, fid)
+                if not okE then skipped += 1 end
+                task.wait(0.3)
+            else
+                fakeE[n] = fid
+            end
+        end
+        for slot, fid in pairs(snap.cosmetics or {}) do
+            local st = slotType(slot)
+            local isUgcBoombox = slot == "BoomboxSlot" and type(fid) == "number" and ENABLED.Boombox
+            if (st and TYPE_OF[fid] == st) or isUgcBoombox then fakeC[slot] = fid else skipped += 1 end
+        end
+        for item, sid in pairs(snap.skins or {}) do
+            local n = tonumber(item)
+            if n and UA2.SKINSET[sid] then fakeS[n] = sid else skipped += 1 end
+        end
+        refreshWheel()
+        pcall(function() Loadout.Changed:Fire() end)
+        pcall(function() Inventory.Changed:Fire() end)
+        log("Perfil aplicado", skipped > 0 and ("(" .. skipped .. " items ya no existen)") or "")
+        return true, skipped
+    end
+
+    function M.Pools()
+        return { emotes = ALL, bytype = BYTYPE, skins = UA2.SKINS }
+    end
+
+    function M.RandomLook()
+        if not active then
+            log("Activa Unlock All primero")
+            return nil
+        end
+        local function pick(list)
+            if type(list) == "table" and #list > 0 then
+                return list[math.random(1, #list)]
+            end
+            return nil
+        end
+        local snap = { emotes = {}, cosmetics = {}, skins = {} }
+        if emoteOn and #ALL > 0 then
+            local maxSlot = (UA2.extraLocked and not UA2.slotsOn) and 6 or 12
+            local pool = table.clone(ALL)
+            for idx = 1, maxSlot do
+                if #pool == 0 then
+                    break
+                end
+                local k = math.random(1, #pool)
+                snap.emotes[tostring(idx)] = pool[k]
+                pool[k] = pool[#pool]
+                pool[#pool] = nil
+            end
+        end
+        if cosOn then
+            local used = {}
+            for _, slot in ipairs({ "CosmeticSlot_1", "CosmeticSlot_2", "CharacterSlot", "UnusualSlot", "CarryAnimationSlot", "NametagSlot" }) do
+                local st = slotType(slot)
+                if st and ENABLED[st] then
+                    for _ = 1, 4 do
+                        local id = pick(BYTYPE[st])
+                        if id and not used[id] then
+                            used[id] = true
+                            snap.cosmetics[slot] = id
+                            break
+                        end
+                    end
+                end
+            end
+            if ENABLED.Boombox then
+                local b = pick(M.GetBoomboxSkins())
+                if b then
+                    snap.cosmetics.BoomboxSlot = b.id
+                end
+            end
+        end
+        if UA2.skinOn and #UA2.SKINS > 0 then
+            if not UA2.skinItem then
+
+                local map = {}
+                for _, sid in ipairs(UA2.SKINS) do
+                    local ok, item = pcall(function()
+                        return Registry.GetById(sid).Module.Original.Value:GetAttribute("ID")
+                    end)
+                    if ok and type(item) == "number" then
+                        map[item] = map[item] or {}
+                        table.insert(map[item], sid)
+                    end
+                end
+                UA2.skinItem = map
+            end
+            for item, list in pairs(UA2.skinItem) do
+                snap.skins[tostring(item)] = pick(list)
+            end
+        end
+        return snap
+    end
+
+    function M.SetInGame(name, state)
+        if INGAME[name] == nil then
+            log("Solo se puede para Perk, Nametag o Boombox")
+            return
+        end
+        INGAME[name] = state and true or false
+        log("En partida:", name, INGAME[name] and "activado" or "desactivado", "(aplica en la proxima actualizacion del servidor)")
+    end
+
+    return M
+end)()
+end
+local UA = getgenv().HydraUnlockAll
+local Unlock = {LOOK_FILE = "Hydra_Look.json", AutoLook = true, Waiting = 0}
+function Unlock.saveLook()
+    if type(writefile) ~= "function" or not UA then return false end
+    local ok = pcall(function()
+        writefile(Unlock.LOOK_FILE, game:GetService("HttpService"):JSONEncode(UA.Snapshot()))
+    end)
+    return ok
+end
+function Unlock.loadLook()
+    if type(readfile) ~= "function" or type(isfile) ~= "function" or not UA then return false end
+    local ok, snap = pcall(function()
+        if not isfile(Unlock.LOOK_FILE) then return nil end
+        return game:GetService("HttpService"):JSONDecode(readfile(Unlock.LOOK_FILE))
+    end)
+    if not ok or type(snap) ~= "table" then return false end
+    return (UA.ApplySnapshot(snap))
+end
+function Unlock.lastLine()
+    local log = UA and UA.Log
+    if type(log) == "table" and #log > 0 then return (tostring(log[#log]):gsub("^%[Hydra%-UnlockAll%]%s*", "")) end
+    return ""
+end
+
+Hydra:AddTranslations({
+    ["Desbloquea todo de forma visual (solo lo ves vos)"] = "Unlocks everything visually (only you see it)",
+    ["Cosm\195\169ticos"] = "Cosmetics", ["Personajes"] = "Characters", ["Unusuals"] = "Unusuals", ["Perks"] = "Perks",
+    ["Animaci\195\179n de cargar"] = "Carry animation", ["Nametags"] = "Nametags", ["Boombox"] = "Boombox",
+    ["Perk en partida"] = "Perk in match", ["Nametag en partida"] = "Nametag in match", ["Boombox en partida"] = "Boombox in match",
+    ["Tambi\195\169n se ve durante la ronda"] = "Also shows during the round",
+    ["Skin del boombox"] = "Boombox skin", ["Eleg\195\173 cualquiera"] = "Pick any",
+    ["Look aleatorio"] = "Random look", ["Emotes, cosm\195\169ticos y skins al azar"] = "Random emotes, cosmetics and skins",
+    ["Guardar mi look"] = "Save my look", ["Lo que ten\195\169s puesto ahora"] = "What you are wearing now",
+    ["Cargar mi look"] = "Load my look", ["El \195\186ltimo que guardaste"] = "The last one you saved",
+    ["Cargar mi look al activar"] = "Load my look when turning on", ["Se pone solo cada vez que lo prend\195\169s"] = "It is applied every time you turn it on",
+    ["Unlock All activo"] = "Unlock All on", ["Unlock All no se pudo activar"] = "Unlock All could not turn on",
+    ["Activ\195\161 Unlock All primero"] = "Turn on Unlock All first", ["Look guardado"] = "Look saved", ["Look aplicado"] = "Look applied",
+    ["No hay un look guardado"] = "There is no saved look", ["Tu ejecutor no puede guardar archivos"] = "Your executor can't save files",
+})
+
+local TabExtra = Hydra:Tab({Id = "Extra", Title = "Extra", Caption = "EXTRA", Icon = "\226\156\142"})
+TabExtra:Section("Unlock All", "\226\156\142")
+local UnlockToggle
+UnlockToggle = TabExtra:Toggle({Id = "unlockAll", Title = "Unlock All", Desc = "Desbloquea todo de forma visual (solo lo ves vos)", Icon = "\226\156\142", Keybind = true, Floating = true,
+    Callback = function(on)
+        if not UA then
+            Hydra:Notify("Unlock All: " .. Hydra:T("No disponible en este ejecutor"))
+            task.defer(function() UnlockToggle:Set(false, true) end)
+            return
+        end
+        if not on then
+            pcall(UA.Disable)
+            return
+        end
+        local logStart = type(UA.Log) == "table" and #UA.Log or 0
+        pcall(UA.Enable)
+        Unlock.Waiting = Unlock.Waiting + 1
+        local token = Unlock.Waiting
+        -- se activa en segundo plano: espera el resultado (hasta 20 s) y avisa
+        task.spawn(function()
+            local t0 = os.clock()
+            while os.clock() - t0 < 20 and token == Unlock.Waiting do
+                local okOn, isOn = pcall(UA.IsEnabled)
+                if okOn and isOn then
+                    Hydra:Notify(Hydra:T("Unlock All activo"))
+                    if Unlock.AutoLook then task.wait(0.5) Unlock.loadLook() end
+                    local boombox = Hydra.Options.uaBoombox and Hydra.Options.uaBoombox:Get()
+                    if boombox ~= nil then pcall(UA.SetBoombox, boombox) end
+                    return
+                end
+                -- si el modulo aviso que aborto o fallo desde que se pidio activar, no se espera mas
+                local failed = false
+                for i = logStart + 1, (type(UA.Log) == "table" and #UA.Log or 0) do
+                    local line = tostring(UA.Log[i]):gsub("^%[Hydra%-UnlockAll%]%s*", "")
+                    if string.find(line, "^ABORTADO") or string.find(line, "^FALLO") then failed = true end
+                end
+                if failed then break end
+                task.wait(0.3)
+            end
+            if token ~= Unlock.Waiting then return end
+            Hydra:Notify(Hydra:T("Unlock All no se pudo activar"))
+            task.defer(function() UnlockToggle:Set(false, true) end)
+        end)
+    end})
+-- tipos que se desbloquean
+for _, kind in ipairs({
+    {"Cosmetic", "Cosm\195\169ticos"}, {"Character", "Personajes"}, {"Unusual", "Unusuals"}, {"Perk", "Perks"},
+    {"CarryAnimation", "Animaci\195\179n de cargar"}, {"Nametag", "Nametags"}, {"Boombox", "Boombox"},
+}) do
+    local typeName = kind[1]
+    UnlockToggle:Toggle({Id = "uaType" .. typeName, Title = kind[2], Default = true,
+        Callback = function(on) if UA then pcall(UA.SetType, typeName, on) end end})
+end
+-- tambien en partida (Perk, Nametag, Boombox)
+for _, kind in ipairs({{"Perk", "Perk en partida"}, {"Nametag", "Nametag en partida"}, {"Boombox", "Boombox en partida"}}) do
+    local typeName = kind[1]
+    UnlockToggle:Toggle({Id = "uaInGame" .. typeName, Title = kind[2], Desc = "Tambi\195\169n se ve durante la ronda", Default = true,
+        Callback = function(on) if UA then pcall(UA.SetInGame, typeName, on) end end})
+end
+UnlockToggle:Dropdown({Id = "uaBoombox", Title = "Skin del boombox", Desc = "Eleg\195\173 cualquiera",
+    Options = function()
+        local list = {}
+        if UA then
+            local ok, skins = pcall(UA.GetBoomboxSkins)
+            if ok and type(skins) == "table" then
+                for _, skin in ipairs(skins) do list[#list + 1] = {value = skin.id, text = skin.name} end
+            end
+        end
+        return list
+    end,
+    Callback = function(id)
+        if UA and UA.IsEnabled() then pcall(UA.SetBoombox, id) end
+    end})
+UnlockToggle:Button({Title = "Look aleatorio", Desc = "Emotes, cosm\195\169ticos y skins al azar",
+    Callback = function()
+        if not (UA and UA.IsEnabled()) then Hydra:Notify(Hydra:T("Activ\195\161 Unlock All primero")) return end
+        local snap = UA.RandomLook()
+        if snap then UA.ApplySnapshot(snap) Hydra:Notify(Hydra:T("Look aplicado")) end
+    end})
+UnlockToggle:Button({Title = "Guardar mi look", Desc = "Lo que ten\195\169s puesto ahora",
+    Callback = function()
+        if not (UA and UA.IsEnabled()) then Hydra:Notify(Hydra:T("Activ\195\161 Unlock All primero")) return end
+        Hydra:Notify(Hydra:T(Unlock.saveLook() and "Look guardado" or "Tu ejecutor no puede guardar archivos"))
+    end})
+UnlockToggle:Button({Title = "Cargar mi look", Desc = "El \195\186ltimo que guardaste",
+    Callback = function()
+        if not (UA and UA.IsEnabled()) then Hydra:Notify(Hydra:T("Activ\195\161 Unlock All primero")) return end
+        Hydra:Notify(Hydra:T(Unlock.loadLook() and "Look aplicado" or "No hay un look guardado"))
+    end})
+UnlockToggle:Toggle({Id = "uaAutoLook", Title = "Cargar mi look al activar", Desc = "Se pone solo cada vez que lo prend\195\169s", Default = true,
+    Callback = function(on) Unlock.AutoLook = on end})
+Unlock.AutoLook = Hydra.Options.uaAutoLook:Get()
+-- los tipos guardados se aplican al modulo al iniciar
+if UA then
+    for _, typeName in ipairs({"Cosmetic", "Character", "Unusual", "Perk", "CarryAnimation", "Nametag", "Boombox"}) do
+        pcall(UA.SetType, typeName, Hydra.Options["uaType" .. typeName]:Get())
+    end
+    for _, typeName in ipairs({"Perk", "Nametag", "Boombox"}) do
+        pcall(UA.SetInGame, typeName, Hydra.Options["uaInGame" .. typeName]:Get())
+    end
+end
