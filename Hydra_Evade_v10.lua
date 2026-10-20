@@ -3413,3 +3413,73 @@ if UA then
         pcall(UA.SetInGame, typeName, Hydra.Options["uaInGame" .. typeName]:Get())
     end
 end
+
+-- ==================== WALL WALK (Extra) ====================
+-- Verificado en el codigo de Evade (extraccion 19/10):
+--  - Correr por la pared son los estados "WallrunLeft" / "WallrunRight" (Shared.StateInfo). Piden: no estar en el piso,
+--    tener una pared al costado hacia donde moves (izquierda/derecha) y RelativeSpeedTest {">", 20} (unos 20 studs/s:
+--    corriendo si, caminando no; la prueba es RelativeSpeed >= 20).
+--  - Mientras dura, el juego prende una VectorForce "WallrunForce" en el HumanoidRootPart que solo levanta la MITAD
+--    del peso (masa x gravedad x 0.5): por eso vas cayendo de a poco hasta despegarte.
+-- Wall Walk: mientras estas en la pared, esa fuerza levanta el peso entero y la caida se corta (no bajas). Con
+-- "Tambien caminando", el requisito de velocidad baja a 0 y te quedas en la pared aunque camines o te frenes
+-- (mientras mantengas apretado el costado hacia la pared). Al apagar se devuelve el 20 original.
+local WallWalk = {Enabled = false, Walking = true, original = nil}
+function WallWalk.states()
+    local ok, info = pcall(function() return require(Core.module("Objects", "Game", "Character", "Shared", "StateInfo")) end)
+    if not ok or type(info) ~= "table" or type(info.GetState) ~= "function" then return {} end
+    local list = {}
+    for _, name in ipairs({"WallrunLeft", "WallrunRight"}) do
+        local okState, state = pcall(info.GetState, info, name)
+        if okState and type(state) == "table" and type(state.Requirements) == "table" then list[#list + 1] = state end
+    end
+    return list
+end
+-- cambia (o devuelve) la velocidad minima para quedarse en la pared
+function WallWalk.speedRule()
+    local lower = WallWalk.Enabled and WallWalk.Walking
+    for _, state in ipairs(WallWalk.states()) do
+        local rule = state.Requirements.RelativeSpeedTest
+        if type(rule) == "table" then
+            if WallWalk.original == nil and rule[2] ~= 0 then WallWalk.original = rule[2] end
+            rule[2] = lower and 0 or (WallWalk.original or 20)
+        end
+    end
+end
+Core.steps.wallWalk = function(ctx)
+    if not WallWalk.Enabled or not ctx.movement then return end
+    local state = ctx.movement.State
+    if state ~= "WallrunLeft" and state ~= "WallrunRight" then return end
+    -- fuerza del juego: el peso entero en vez de la mitad
+    pcall(function()
+        local force = ctx.movement.Constraints.Constraints.WallrunForce
+        force.Force = Vector3.new(0, ctx.root:GetMass() * workspace.Gravity, 0)
+    end)
+    -- y se corta la caida que ya traias
+    local v = ctx.root.AssemblyLinearVelocity
+    if v.Y < 0 then ctx.root.AssemblyLinearVelocity = Vector3.new(v.X, 0, v.Z) end
+end
+
+Hydra:AddTranslations({
+    ["Pared"] = "Wall",
+    ["No te ca\195\169s mientras corr\195\169s por la pared"] = "You don't fall while running on the wall",
+    ["Tambi\195\169n caminando"] = "Also walking", ["Te qued\195\161s en la pared aunque camines o frenes"] = "You stay on the wall even if you walk or stop",
+})
+TabExtra:Section("Pared", "W")
+local WallToggle
+WallToggle = TabExtra:Toggle({Id = "wallWalk", Title = "Wall Walk", Desc = "No te ca\195\169s mientras corr\195\169s por la pared", Icon = "W", Keybind = true, Floating = true,
+    Callback = function(on)
+        if on and not Core.hook() then
+            Hydra:Notify("Wall Walk: " .. Hydra:T("No disponible en este ejecutor"))
+            task.defer(function() WallToggle:Set(false, true) end)
+            return
+        end
+        WallWalk.Enabled = on
+        WallWalk.speedRule()
+    end})
+WallToggle:Toggle({Id = "wallWalkSlow", Title = "Tambi\195\169n caminando", Desc = "Te qued\195\161s en la pared aunque camines o frenes", Default = true,
+    Callback = function(on)
+        WallWalk.Walking = on
+        WallWalk.speedRule()
+    end})
+WallWalk.Walking = Hydra.Options.wallWalkSlow:Get()
